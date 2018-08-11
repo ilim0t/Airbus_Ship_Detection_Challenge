@@ -65,18 +65,13 @@ def collate(batch):
     error_msg = "batch must contain tensors, numbers, dicts or lists; found {}"
 
     if any([isinstance(i, torch.Tensor) for i in batch]):
-        a = torch.stack([i for i in batch if i is not None], 0, out=None)
-        if a.dim() < 4:
-            pass
-        return a
+        return torch.stack([i for i in batch if i is not None], 0, out=None)
     elif isinstance(batch[0], int):
         return torch.LongTensor(batch)
     elif isinstance(batch[0], collections.Sequence):
         transposed = zip(*batch)
-        re = [collate(samples) for samples in transposed]
-        return re
+        return [collate(samples) for samples in transposed]
     elif all([i is None for i in batch]):
         return torch.empty(0)
 
     raise TypeError((error_msg.format(type(batch[0]))))
-

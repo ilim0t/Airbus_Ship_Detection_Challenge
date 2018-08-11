@@ -41,18 +41,15 @@ class Net(nn.Module):
         self.fc = nn.Linear(8*4*4, 1)
 
     def forward(self, x):
-        try:
-            x = F.relu(F.max_pool2d(self.conv1(x), 2))
-            x = F.relu(F.max_pool2d(self.conv2(x), 2))
-            x = F.relu(F.max_pool2d(self.conv3(x), 2))
-            x = self.conv3_drop(x)
-            x = F.relu(F.max_pool2d(self.conv4(x), 2))
-            x = F.relu(F.max_pool2d(self.conv5(x), 2))
-            x = F.relu(F.max_pool2d(self.conv6(x), 2))
-            x = F.relu(F.max_pool2d(self.conv7(x), 2))
-            x = self.fc(x.view(x.size(0), -1)).squeeze()
-        except:
-            pass
+        x = F.relu(F.max_pool2d(self.conv1(x), 2))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2))
+        x = F.relu(F.max_pool2d(self.conv3(x), 2))
+        x = self.conv3_drop(x)
+        x = F.relu(F.max_pool2d(self.conv4(x), 2))
+        x = F.relu(F.max_pool2d(self.conv5(x), 2))
+        x = F.relu(F.max_pool2d(self.conv6(x), 2))
+        x = F.relu(F.max_pool2d(self.conv7(x), 2))
+        x = self.fc(x.view(x.size(0), -1)).squeeze()
         return torch.sigmoid(x)
 
 
@@ -120,7 +117,7 @@ def main():
                         help='使うモデルの種類')
     parser.add_argument('--lossfunc', '-l', type=int, default=0,
                         help='使うlossの種類')
-    parser.add_argument('--eval_interval', '-ei', type=int, default=1,
+    parser.add_argument('--eval_interval', '-ei', type=int, default=100,
                         help='検証をどの周期で行うか')
     args = parser.parse_args()
 
@@ -140,7 +137,7 @@ def main():
 
     kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=collate, *kwargs)
-    eval_loader = DataLoader(eval_dataset, batch_size=args.eval_batch_size if hasattr(args, "val_batch_size") else 5,
+    eval_loader = DataLoader(eval_dataset, batch_size=eval_batch_size if hasattr(args, "val_batch_size") else 5,
                              collate_fn=collate, *kwargs)
 
     model = Net().to(device)
@@ -166,9 +163,9 @@ def main():
             step = iteration_idx + (epoch_idx - 1) * (len(train_loader) // args.batch_size)
 
             with reporter.scope(epoch_idx, iteration_idx, step):
-                train(model, device, train_loader, optimizer, reporter, step)
+                # train(model, device, train_loader, optimizer, reporter, step)
                 if step % args.eval_interval == 0:
-                    eval(model, device, eval_dataset, reporter, step)
+                    eval(model, device, eval_loader, reporter, step)
                 # trainer(epoch_idx, cum_iteration)
 
 

@@ -2,3 +2,7 @@ input
 .DS_Store
 .idea
 *test*
+result
+__pycache__
+mnist
+
