@@ -47,9 +47,9 @@ def decode(data: Union[str, List[int]], size: Tuple[int, int]=(768, 768)) -> tor
 
 def metric_to_img(x):
     if x is np.nan:
-        return True, None
+        return False, None
     else:
-        return False, decode(x)
+        return True, decode(x)
 
 
 def show(img: torch.Tensor):
@@ -65,12 +65,18 @@ def collate(batch):
     error_msg = "batch must contain tensors, numbers, dicts or lists; found {}"
 
     if any([isinstance(i, torch.Tensor) for i in batch]):
-        return torch.stack([i for i in batch if i is not None], 0, out=None)
+        a = torch.stack([i for i in batch if i is not None], 0, out=None)
+        if a.dim() < 4:
+            pass
+        return a
     elif isinstance(batch[0], int):
         return torch.LongTensor(batch)
     elif isinstance(batch[0], collections.Sequence):
         transposed = zip(*batch)
         re = [collate(samples) for samples in transposed]
         return re
+    elif all([i is None for i in batch]):
+        return torch.empty(0)
 
     raise TypeError((error_msg.format(type(batch[0]))))
+
