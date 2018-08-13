@@ -34,7 +34,9 @@ def encode(img: np.ndarray) -> str:
     return " ".join([str(i) for i in data])
 
 
-def decode(data: Union[str, List[int]], size: Tuple[int, int]=(768, 768)) -> torch.Tensor:
+def decode(data: Union[str, List[int], float], size: Tuple[int, int]=(768, 768)) -> torch.Tensor:
+    if data is np.nan:
+        return torch.zeros(size)
     if isinstance(data, str):
         data = [int(i) for i in data.split()]
     assert len(data) % 2 == 0, "dataが2の倍数でありません"
@@ -45,14 +47,6 @@ def decode(data: Union[str, List[int]], size: Tuple[int, int]=(768, 768)) -> tor
         for i in range(start, start + end):
             img[i-1] = 1
     return img.view(size).t()
-
-
-def metric_to_img(x):
-    if x is np.nan:
-        return False, None
-    else:
-        return True, decode(x)
-
 
 def show(img: torch.Tensor):
     if img.size()[0] == 3:

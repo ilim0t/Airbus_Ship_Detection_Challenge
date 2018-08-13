@@ -94,7 +94,7 @@ class Repoter(object):
         out = self._out
         epoch = self._epoch
         iteration = self._iteration
-        percent_epoch = epoch - 1 + iteration / self.iter_per_epoch
+        percent_epoch = iteration / self.iter_per_epoch
         recent_timing = self._recent_timing
         now = time.time()
 
