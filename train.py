@@ -14,7 +14,7 @@ from trainer import Trainer, MyTrainer
 import extensions
 from repoter import Repoter
 from tensorboardX import SummaryWriter
-from model import Net, Unet
+from model import Net, Unet, Unet2
 
 import numpy as np
 import argparse
@@ -33,6 +33,7 @@ def train(model, device, train_loader, optimizer, reporter, step):
     map(lambda x: x.to(device), [data, segment])
     optimizer.zero_grad()
     output = model(data)
+    output = transforms.Resize((768, 768))(output)
     loss = F.binary_cross_entropy(output, segment)
     loss.backward()
     optimizer.step()
@@ -80,7 +81,7 @@ def eval(model, device, eval_loader, reporter, step):
 
 def main():
     parser = argparse.ArgumentParser(description='Airbus Ship Detection Challenge')
-    parser.add_argument('--batch_size', '-b', type=int, default=64,
+    parser.add_argument('--batch_size', '-b', type=int, default=4,
                         help='1バッチあたり何枚か')
     parser.add_argument('--epochs', '-e', type=int, default=5,
                         help='何epochやるか')
@@ -114,8 +115,7 @@ def main():
     dataset = SubSatelliteImages(".", train=True,
                                  transform=transforms.Compose((
                                      # transforms.Resize(384),
-                                     # transforms.Resize(192),
-                                     transforms.Resize(192),
+                                     transforms.Resize(256),
                                      transforms.ToTensor(),
                                      transforms.Normalize(
                                      (0.2047899,  0.2887916, 0.3172972),
@@ -123,6 +123,7 @@ def main():
                                  )),
                                  target_transform=transforms.Compose((
                                      decode,
+                                     transforms.ToTensor(),
                                      lambda x: x.unsqueeze(0),
                                      # transforms.ToPILImage(),
                                      # transforms.Resize(192),
@@ -138,7 +139,7 @@ def main():
                              collate_fn=collate, *kwargs)
 
     # model = Net().to(device)
-    model = Unet().to(device)
+    model = Unet2().to(device)
     optimizer = optim.Adam(model.parameters())
     writer = SummaryWriter(os.path.join(args.out, datetime.now().strftime('%m-%d_%H:%M:%S_bs-{}'.format(args.batch_size))))
     reporter = Repoter(['epoch', 'iteration', 'train/loss', 'train/accuracy', 'eval/loss', 'eval/accuracy', 'elapsed_time'], writer,

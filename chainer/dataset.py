@@ -1,24 +1,22 @@
 #!/usr/bin/env python
 
-import torch
-from torch.utils.data import Dataset
-from torchvision import transforms
+import chainer
+import chainer.functions as F
+import numpy as np
 
-# from util import *
 import pandas
 
 import os
 from PIL import Image
 
-
-class SatelliteImages(Dataset):
+class SatelliteImages(object):
     processed_folder = "input"
     train_dir = "train"
     train_csv = "train_ship_segmentations.csv"
     test_dir = "test"
     test_csv = "sample_submission.csv"
 
-    def __init__(self, root: str, train: bool=True, transform=transforms.ToTensor(), target_transform=None, download: bool=False):
+    def __init__(self, root: str, train: bool=True, transform=np.asarray, target_transform=None, download: bool=False):
         self.root = os.path.expanduser(root)
         self.transform = transform
         self.target_transform = target_transform
@@ -69,7 +67,7 @@ class SatelliteImages(Dataset):
 
 
 class SubSatelliteImages(SatelliteImages):
-    def __init__(self, root: str, train: bool=True, transform=transforms.ToTensor(), target_transform=None, download: bool=False):
+    def __init__(self, root: str, train: bool=True, transform=np.asarray, target_transform=None, download: bool=False):
         self.root = os.path.expanduser(root)
         self.transform = transform
         self.target_transform = target_transform

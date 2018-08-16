@@ -49,11 +49,13 @@ class Unet(nn.Module):
         )
 
         self.upsamp3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-        self.up1 = UnetBlock(512, 256)
+        self.up3 = UnetBlock(512, 256)
+
         self.upsamp2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
         self.up2 = UnetBlock(256, 128)
+
         self.upsamp1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.up3 = UnetBlock(128, 64)
+        self.up1 = UnetBlock(128, 64)
 
         self.upsamp0 = nn.ConvTranspose2d(64, 64, kernel_size=3, stride=3)
         self.outconv = nn.Conv2d(64+32, 1, kernel_size=1)
@@ -87,3 +89,40 @@ class UnetBlock(nn.Module):
         x = self.conv2(F.relu(x))
         x = self.conv3(F.relu(x))
         return x
+
+
+class Unet2(Unet):
+    def __init__(self):
+        super(Unet, self).__init__()
+        self.down0 = UnetBlock(3, 32)
+        self.down1 = UnetBlock(32, 64)
+        self.down2 = UnetBlock(64, 128)
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        )
+
+        self.upsamp2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.up2 = UnetBlock(256, 128)
+
+        self.upsamp1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.up1 = UnetBlock(128, 64)
+
+        self.upsamp0 = nn.ConvTranspose2d(64, 64, kernel_size=3, stride=3)
+        self.outconv = nn.Conv2d(64+32, 1, kernel_size=1)
+
+    def forward(self, x):  # => 3, 256
+        x0 = self.down0(x)  # => 32, 256
+        x1 = self.down1(F.max_pool2d(x0, 2))  # => 64, 128
+        x2 = self.down2(F.max_pool2d(x1, 2))  # => 128, 64
+
+        x3 = self.conv(F.max_pool2d(x2, 2))  # => 256, 32
+
+        x2 = self.up1(torch.cat((x2, self.upsamp2(x3)), dim=1))  # => 128, 128
+        x1 = self.up1(torch.cat((x1, self.upsamp1(x2)), dim=1))  # => 64, 256
+
+        x0 = self.outconv(torch.cat((x0, self.upsamp0(x1)), dim=1))  # => 1, 768
+        x0 = torch.sigmoid(x0)
+        return x0
