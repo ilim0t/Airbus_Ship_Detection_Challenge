@@ -103,6 +103,8 @@ def main():
                         help='使うlossの種類')
     parser.add_argument('--eval_interval', '-ei', type=int, default=200,
                         help='検証をどの周期で行うか')
+    parser.add_argument('--server', '-s', action='store_true', default=False,
+                        help='サーバー上か')
     args = parser.parse_args()
     print(json.dumps(args.__dict__, indent=2))
 
@@ -112,8 +114,7 @@ def main():
     torch.manual_seed(0)
 
     # dataset = SatelliteImages(".", train=True,
-    dataset = SubSatelliteImages(".", train=True,
-                                 transform=transforms.Compose((
+    dataset = (SatelliteImages if args.server else SubSatelliteImages)(".", train=True, transform=transforms.Compose((
                                      # transforms.Resize(384),
                                      transforms.Resize(256),
                                      transforms.ToTensor(),

@@ -72,3 +72,16 @@ def collate(batch):
         return torch.empty(0)
 
     raise TypeError((error_msg.format(type(batch[0]))))
+
+
+class Normalize(object):
+    def __init__(self, mean, std):
+        assert len(mean) == len(std), "meanとstdの数が異なります"
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, img: np.ndarray) -> np.ndarray:
+        img = img / 255.
+        for i, (m, s) in enumerate(zip(self.mean, self.std)):
+            img[i] = (img[i] - m) / s
+        return img

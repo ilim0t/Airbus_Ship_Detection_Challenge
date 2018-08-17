@@ -8,7 +8,7 @@ from collections import OrderedDict
 
 from dataset import SatelliteImages, SubSatelliteImages
 from tensorboardX import SummaryWriter
-from model import Net, Unet, Unet2
+from c_model import Net, Unet, Unet2
 from util import decode, Normalize
 
 import numpy as np
@@ -90,6 +90,8 @@ def main():
                         help='使うlossの種類')
     parser.add_argument('--eval_interval', '-ei', type=int, default=200,
                         help='検証をどの周期で行うか')
+    parser.add_argument('--server', '-s', action='store_true', default=False,
+                        help='サーバー上か')
     args = parser.parse_args()
     print(json.dumps(args.__dict__, indent=2))
 
@@ -102,8 +104,7 @@ def main():
     optimizer = chainer.optimizers.Adam()
     optimizer.setup(model)
 
-    dataset = SatelliteImages(".",
-                                 transform=chainer.Sequential(
+    dataset = (SatelliteImages if args.server else SubSatelliteImages)(".", transform=chainer.Sequential(
                                      lambda img: img.resize((386, 386)),
                                      lambda img: np.asarray(img, dtype=np.float32).transpose((2, 0, 1)),
                                      Normalize(
