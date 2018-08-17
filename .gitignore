@@ -8,6 +8,4 @@ mnist
 *.json
 cg.png
 runs
-train_mnist.py
-demo.py
-mnist_example.py
+example

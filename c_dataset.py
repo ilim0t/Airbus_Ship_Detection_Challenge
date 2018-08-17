@@ -9,6 +9,7 @@ import pandas
 import os
 from PIL import Image
 
+
 class SatelliteImages(object):
     processed_folder = "input"
     train_dir = "train"

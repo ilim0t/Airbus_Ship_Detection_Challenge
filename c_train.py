@@ -102,7 +102,7 @@ def main():
     optimizer = chainer.optimizers.Adam()
     optimizer.setup(model)
 
-    dataset = SubSatelliteImages("..",
+    dataset = SatelliteImages(".",
                                  transform=chainer.Sequential(
                                      lambda img: img.resize((386, 386)),
                                      lambda img: np.asarray(img, dtype=np.float32).transpose((2, 0, 1)),
