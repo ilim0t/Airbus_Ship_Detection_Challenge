@@ -46,8 +46,8 @@ class Net(chainer.Chain):
 
 
 class Writer(chainer.training.Extension):
-    def __init__(self, writer=SummaryWriter(), log_report="LogReport"):
-        self._writer = writer
+    def __init__(self, writer=None, log_report="LogReport"):
+        self._writer = writer or SummaryWriter()
         self._log_report = log_report
 
     def __call__(self, trainer):
