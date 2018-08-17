@@ -6,7 +6,7 @@ import chainer.functions as F
 
 from collections import OrderedDict
 
-from dataset import SatelliteImages, SubSatelliteImages
+from dataset import SatelliteImages
 from tensorboardX import SummaryWriter
 from c_model import Net, Unet, Unet2
 from util import decode, Normalize
@@ -72,7 +72,7 @@ def main():
                         help='1バッチあたり何枚か')
     parser.add_argument('--epochs', '-e', type=int, default=5,
                         help='何epochやるか')
-    parser.add_argument('--out', '-o', default='../result',
+    parser.add_argument('--out', '-o', default='result',
                         help='結果を出力するディレクトリ')
     parser.add_argument('--resume', '-r', default='',
                         help='指定したsnapshotから継続して学習します')
@@ -80,14 +80,8 @@ def main():
                         help='指定したepochごとに重みを保存します')
     parser.add_argument('--gpu', '-g', type=int, default=-1,
                         help='GPU ID')
-    parser.add_argument('--total_photo_num', '-n', type=int, default=-1,
-                        help='使用する写真データの数'),  # (9815, 39269)
     parser.add_argument('--log_interval', '-i', type=int, default=1,
                         help='何iteraionごとに画面に出力するか')
-    parser.add_argument('--model', '-m', type=int, default=0,
-                        help='使うモデルの種類')
-    parser.add_argument('--lossfunc', '-l', type=int, default=0,
-                        help='使うlossの種類')
     parser.add_argument('--eval_interval', '-ei', type=int, default=200,
                         help='検証をどの周期で行うか')
     parser.add_argument('--server', '-s', action='store_true', default=False,
@@ -104,8 +98,8 @@ def main():
     optimizer = chainer.optimizers.Adam()
     optimizer.setup(model)
 
-    dataset = (SatelliteImages if args.server else SubSatelliteImages)(".", transform=chainer.Sequential(
-                                     lambda img: img.resize((386, 386)),
+    dataset = SatelliteImages(".", transform=chainer.Sequential(
+                                     lambda img: img.resize((384, 384)),
                                      lambda img: np.asarray(img, dtype=np.float32).transpose((2, 0, 1)),
                                      Normalize(
                                          (0.2047899, 0.2887916, 0.3172972),
@@ -114,7 +108,7 @@ def main():
                                  target_transform=chainer.Sequential(
                                      decode,
                                      lambda x: x.reshape((1, *x.shape))
-                                 ))
+                                 ), on_server=(sys.platform == "linux"))
     train, test = chainer.datasets.split_dataset_random(dataset, len(dataset) - min(64*4, int(len(dataset) * 0.01)), seed=0)
 
     train_iter = chainer.iterators.SerialIterator(train, args.batch_size)

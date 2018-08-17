@@ -46,7 +46,7 @@ def decode(data: Union[str, List[int], float], size: Tuple[int, int]=(768, 768))
     for start, end in [data[i:i+2] for i in range(0, len(data), 2)]:
         for i in range(start, start + end):
             img[i-1] = 1
-    return np.reshape(size).traspose((1, 0))
+    return np.reshape(img, size).transpose((1, 0))
 
 
 def show(img: torch.Tensor):

@@ -9,6 +9,7 @@ import pandas
 
 import os
 from PIL import Image
+import glob
 
 
 class SatelliteImages(Dataset):
@@ -18,7 +19,7 @@ class SatelliteImages(Dataset):
     test_dir = "test"
     test_csv = "sample_submission.csv"
 
-    def __init__(self, root: str, train: bool=True, transform=transforms.ToTensor(), target_transform=None, download: bool=False):
+    def __init__(self, root: str, train: bool=True, transform=transforms.ToTensor(), target_transform=None, on_server: bool=False):
         self.root = os.path.expanduser(root)
         self.transform = transform
         self.target_transform = target_transform
@@ -27,6 +28,10 @@ class SatelliteImages(Dataset):
         if self.train:
             self.train_data = pandas.read_csv(os.path.join(self.root, self.processed_folder, self.train_csv))
             self.train_data = list(zip(self.train_data["ImageId"], self.train_data["EncodedPixels"]))
+            if not on_server:
+                files = [os.path.basename(i) for i in
+                        glob.glob(os.path.join(self.root, self.processed_folder, self.train_dir, "*"))]
+                self.train_data = list(filter(lambda x: x[0] in files, self.train_data))
         else:
             self.test_data = list(pandas.read_csv(os.path.join(self.root, self.processed_folder, self.test_csv))["ImageId"])
 
@@ -66,22 +71,6 @@ class SatelliteImages(Dataset):
         tmp = '    Target Transforms (if any): '
         fmt_str += '{0}{1}'.format(tmp, self.target_transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
         return fmt_str
-
-
-class SubSatelliteImages(SatelliteImages):
-    def __init__(self, root: str, train: bool=True, transform=transforms.ToTensor(), target_transform=None, download: bool=False):
-        self.root = os.path.expanduser(root)
-        self.transform = transform
-        self.target_transform = target_transform
-        self.train = train
-
-        import glob
-        if self.train:
-            files = [os.path.basename(i) for i in glob.glob(os.path.join(self.root, self.processed_folder, self.train_dir, "*"))]
-            self.train_data = pandas.read_csv(os.path.join(self.root, self.processed_folder, self.train_csv))
-            self.train_data = list(filter(lambda x: x[0] in files, zip(self.train_data["ImageId"], self.train_data["EncodedPixels"])))
-        else:
-            self.test_data = [os.path.basename(i) for i in glob.glob(os.path.join(self.root, self.processed_folder, self.test_dir, "*"))]
 
 
 if __name__ == "__main__":

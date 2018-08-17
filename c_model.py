@@ -117,9 +117,9 @@ class Unet2(Unet):
             self.upsamp0 = L.Deconvolution2D(64, 64, ksize=2, stride=2)
             self.outconv = L.Convolution2D(64+32, 1, ksize=1)
 
-    def forward(self, x):  # => 3, 256
-        x0 = self.down0(x)  # => 32, 256
-        x1 = self.down1(F.max_pooling_2d(x0, 2))  # => 64, 128
+    def forward(self, x):  # => 3, 256, 386
+        x0 = self.down0(x)  # => 32, 256, 386
+        x1 = self.down1(F.max_pooling_2d(x0, 2))  # => 64, 193
         x2 = self.down2(F.max_pooling_2d(x1, 2))  # => 128, 64
 
         x3 = self.conv(F.max_pooling_2d(x2, 2))  # => 256, 32

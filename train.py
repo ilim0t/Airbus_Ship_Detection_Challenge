@@ -8,10 +8,8 @@ from torch.utils.data import DataLoader, random_split
 from torchvision import datasets, transforms, utils
 from collections import OrderedDict
 
-from dataset import SatelliteImages, SubSatelliteImages
+from dataset import SatelliteImages
 from util import encode, decode, show, collate
-from trainer import Trainer, MyTrainer
-import extensions
 from repoter import Repoter
 from tensorboardX import SummaryWriter
 from model import Net, Unet, Unet2
@@ -93,14 +91,8 @@ def main():
                         help='指定したepochごとに重みを保存します')
     parser.add_argument('--no-cuda', action='store_true', default=False,
                         help='GPUを使用するか')
-    parser.add_argument('--total_photo_num', '-n', type=int, default=-1,
-                        help='使用する写真データの数'),  # (9815, 39269)
     parser.add_argument('--log_interval', '-i', type=int, default=1,
                         help='何iteraionごとに画面に出力するか')
-    parser.add_argument('--model', '-m', type=int, default=0,
-                        help='使うモデルの種類')
-    parser.add_argument('--lossfunc', '-l', type=int, default=0,
-                        help='使うlossの種類')
     parser.add_argument('--eval_interval', '-ei', type=int, default=200,
                         help='検証をどの周期で行うか')
     parser.add_argument('--server', '-s', action='store_true', default=False,
@@ -114,7 +106,7 @@ def main():
     torch.manual_seed(0)
 
     # dataset = SatelliteImages(".", train=True,
-    dataset = (SatelliteImages if args.server else SubSatelliteImages)(".", train=True, transform=transforms.Compose((
+    dataset = SatelliteImages(".", train=True, transform=transforms.Compose((
                                      # transforms.Resize(384),
                                      transforms.Resize(256),
                                      transforms.ToTensor(),
@@ -129,7 +121,7 @@ def main():
                                      # transforms.ToPILImage(),
                                      # transforms.Resize(192),
                                      # transforms.ToTensor()
-                                 )))
+                                 )), on_server=(sys.platform == "linux"))
 
     n = min(64*4, int(len(dataset) * 0.01))
     train_dataset, eval_dataset = random_split(dataset, (len(dataset) - n, n))
