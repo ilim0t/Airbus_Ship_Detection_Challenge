@@ -20,7 +20,7 @@ class Repoter(object):
         self.log = [{}]
         self._log_len = 0
         self.writer = writer
-        self._epoch, self._iteration = 0, 0, 0
+        self._epoch, self._iteration = 0, 0
         self._start = time.time()
 
         entry_widths = [max(10, len(s)) for s in entries]

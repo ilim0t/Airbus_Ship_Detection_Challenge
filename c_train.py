@@ -68,7 +68,7 @@ class Writer(chainer.training.Extension):
 
 def main():
     parser = argparse.ArgumentParser(description='Airbus Ship Detection Challenge')
-    parser.add_argument('--batch_size', '-b', type=int, default=2,
+    parser.add_argument('--batch_size', '-b', type=int, default=16,
                         help='1バッチあたり何枚か')
     parser.add_argument('--epochs', '-e', type=int, default=5,
                         help='何epochやるか')
@@ -107,7 +107,6 @@ def main():
                                  ),
                                  target_transform=chainer.Sequential(
                                      decode,
-                                     lambda x: x.reshape((1, *x.shape))
                                  ), on_server=(sys.platform == "linux"))
     train, test = chainer.datasets.split_dataset_random(dataset, len(dataset) - min(64*4, int(len(dataset) * 0.01)), seed=0)
 

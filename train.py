@@ -79,7 +79,7 @@ def eval(model, device, eval_loader, reporter, step):
 
 def main():
     parser = argparse.ArgumentParser(description='Airbus Ship Detection Challenge')
-    parser.add_argument('--batch_size', '-b', type=int, default=4,
+    parser.add_argument('--batch_size', '-b', type=int, default=16,
                         help='1バッチあたり何枚か')
     parser.add_argument('--epochs', '-e', type=int, default=5,
                         help='何epochやるか')
@@ -107,8 +107,9 @@ def main():
 
     # dataset = SatelliteImages(".", train=True,
     dataset = SatelliteImages(".", train=True, transform=transforms.Compose((
-                                     # transforms.Resize(384),
-                                     transforms.Resize(256),
+                                     transforms.Resize(384),
+                                     # transforms.Resize(256),
+                                     # lambda img: img.reshape((*img.shape, 1)),
                                      transforms.ToTensor(),
                                      transforms.Normalize(
                                      (0.2047899,  0.2887916, 0.3172972),
@@ -116,8 +117,7 @@ def main():
                                  )),
                                  target_transform=transforms.Compose((
                                      decode,
-                                     transforms.ToTensor(),
-                                     lambda x: x.unsqueeze(0),
+                                     torch.from_numpy,
                                      # transforms.ToPILImage(),
                                      # transforms.Resize(192),
                                      # transforms.ToTensor()
@@ -155,7 +155,7 @@ def main():
         for iteration_idx in range(1, len(train_loader) + 1):
             step = iteration_idx + (epoch_idx - 1) * len(train_loader)
 
-            with reporter.scope(epoch_idx, step, step):
+            with reporter.scope(epoch_idx, step):
                 train(model, device, train_iter, optimizer, reporter, step)
                 if step % args.eval_interval == 0:
                     # return
