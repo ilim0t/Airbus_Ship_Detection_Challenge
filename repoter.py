@@ -20,7 +20,7 @@ class Repoter(object):
         self.log = [{}]
         self._log_len = 0
         self.writer = writer
-        self._epoch, self._iteration, self._cum_iteration = 0, 0, 0
+        self._epoch, self._iteration = 0, 0, 0
         self._start = time.time()
 
         entry_widths = [max(10, len(s)) for s in entries]
@@ -44,10 +44,9 @@ class Repoter(object):
         # for key, value in values.items():
         #     self.writer.add_scalar(key, value, self._cum_iteration)
 
-    def scope(self, epoch, iteration, cum_iteration):
+    def scope(self, epoch, iteration):
         self._epoch = epoch
         self._iteration = iteration
-        self._cum_iteration = cum_iteration
         return self
 
     def __enter__(self):
