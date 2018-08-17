@@ -76,7 +76,7 @@ class Unet(chainer.Chain):
 
         x0 = self.outconv(F.concat((x0, self.upsamp0(x1)), axis=1))  # => 1, 768
         x0 = F.sigmoid(x0)
-        return x0
+        return x0.squeeze()
 
 
 class UnetBlock(chainer.Chain):
@@ -129,4 +129,4 @@ class Unet2(Unet):
 
         x0 = self.outconv(F.concat((x0, self.upsamp0(x1)), axis=1))  # => 1, 768
         x0 = F.sigmoid(x0)
-        return x0.sqeeze()
+        return x0.squeeze()

@@ -79,7 +79,7 @@ def eval(model, device, eval_loader, reporter, step):
 
 def main():
     parser = argparse.ArgumentParser(description='Airbus Ship Detection Challenge')
-    parser.add_argument('--batch_size', '-b', type=int, default=16,
+    parser.add_argument('--batch_size', '-b', type=int, default=8,
                         help='1バッチあたり何枚か')
     parser.add_argument('--epochs', '-e', type=int, default=5,
                         help='何epochやるか')

@@ -74,7 +74,7 @@ class Unet(nn.Module):
 
         x0 = self.outconv(torch.cat((x0, self.upsamp0(x1)), dim=1))  # => 1, 768
         x0 = torch.sigmoid(x0)
-        return x0
+        return x0.squeeze()
 
 
 class UnetBlock(nn.Module):
@@ -125,4 +125,4 @@ class Unet2(Unet):
 
         x0 = self.outconv(torch.cat((x0, self.upsamp0(x1)), dim=1))  # => 1, 768
         x0 = torch.sigmoid(x0)
-        return x0.sqeeze()
+        return x0.squeeze()
