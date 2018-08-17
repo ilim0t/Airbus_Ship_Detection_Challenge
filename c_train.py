@@ -31,7 +31,7 @@ class Net(chainer.Chain):
     def forward(self, x):
         x = self.model(x)
         x = F.resize_images(x, (768, 768))
-        return x
+        return F.squeeze(x, axis=1)
 
     def __call__(self, x, t):
         output = self.forward(x)
@@ -74,18 +74,12 @@ def main():
                         help='何epochやるか')
     parser.add_argument('--out', '-o', default='result',
                         help='結果を出力するディレクトリ')
-    parser.add_argument('--resume', '-r', default='',
-                        help='指定したsnapshotから継続して学習します')
-    parser.add_argument('--frequency', '-f', type=int, default=1,
-                        help='指定したepochごとに重みを保存します')
     parser.add_argument('--gpu', '-g', type=int, default=-1,
                         help='GPU ID')
     parser.add_argument('--log_interval', '-i', type=int, default=1,
                         help='何iteraionごとに画面に出力するか')
     parser.add_argument('--eval_interval', '-ei', type=int, default=200,
                         help='検証をどの周期で行うか')
-    parser.add_argument('--server', '-s', action='store_true', default=False,
-                        help='サーバー上か')
     args = parser.parse_args()
     print(json.dumps(args.__dict__, indent=2))
 
@@ -120,8 +114,8 @@ def main():
     trainer.extend(chainer.training.extensions.Evaluator(test_iter, model, device=args.gpu))
     trainer.extend(chainer.training.extensions.dump_graph('main/loss'))
 
-    frequency = args.epoch if args.frequency == -1 else max(1, args.frequency)
-    trainer.extend(chainer.training.extensions.snapshot(), trigger=(frequency, 'epoch'))
+    # frequency = args.epoch if args.frequency == -1 else max(1, args.frequency)
+    # trainer.extend(chainer.training.extensions.snapshot(), trigger=(frequency, 'epoch'))
 
     trainer.extend(chainer.training.extensions.LogReport(trigger=(1, "iteration")))
 
@@ -135,15 +129,15 @@ def main():
 
     trainer.extend(chainer.training.extensions.PrintReport(
         ['epoch', 'iteration', 'main/loss', 'validation/main/loss',
-         'main/accuracy', 'validation/main/accuracy', 'elapsed_time']))
+         'main/accuracy', 'validation/main/accuracy', 'elapsed_time']), trigger=(args.log_interval, 'iteration'))
 
     trainer.extend(chainer.training.extensions.ProgressBar(update_interval=1))
 
     writer = SummaryWriter(os.path.join(args.out, datetime.now().strftime('%m-%d_%H:%M:%S_bs-{}'.format(args.batch_size))))
     trainer.extend(Writer(writer))
 
-    if args.resume:
-        chainer.serializers.load_npz(args.resume, trainer)
+    # if args.resume:
+    #     chainer.serializers.load_npz(args.resume, trainer)
 
     trainer.run()
 

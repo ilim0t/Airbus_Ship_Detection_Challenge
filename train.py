@@ -31,7 +31,6 @@ def train(model, device, train_loader, optimizer, reporter, step):
     map(lambda x: x.to(device), [data, segment])
     optimizer.zero_grad()
     output = model(data)
-    output = transforms.Resize((768, 768))(output)
     loss = F.binary_cross_entropy(output, segment)
     loss.backward()
     optimizer.step()
@@ -85,18 +84,12 @@ def main():
                         help='何epochやるか')
     parser.add_argument('--out', '-o', default='result',
                         help='結果を出力するディレクトリ')
-    parser.add_argument('--resume', '-r', default='',
-                        help='指定したsnapshotから継続して学習します')
-    parser.add_argument('--frequency', '-f', type=int, default=1,
-                        help='指定したepochごとに重みを保存します')
     parser.add_argument('--no-cuda', action='store_true', default=False,
                         help='GPUを使用するか')
     parser.add_argument('--log_interval', '-i', type=int, default=1,
                         help='何iteraionごとに画面に出力するか')
     parser.add_argument('--eval_interval', '-ei', type=int, default=200,
                         help='検証をどの周期で行うか')
-    parser.add_argument('--server', '-s', action='store_true', default=False,
-                        help='サーバー上か')
     args = parser.parse_args()
     print(json.dumps(args.__dict__, indent=2))
 
@@ -117,7 +110,7 @@ def main():
                                  )),
                                  target_transform=transforms.Compose((
                                      decode,
-                                     torch.from_numpy,
+                                     lambda x: torch.tensor(x, dtype=torch.float),
                                      # transforms.ToPILImage(),
                                      # transforms.Resize(192),
                                      # transforms.ToTensor()
@@ -136,7 +129,7 @@ def main():
     optimizer = optim.Adam(model.parameters())
     writer = SummaryWriter(os.path.join(args.out, datetime.now().strftime('%m-%d_%H:%M:%S_bs-{}'.format(args.batch_size))))
     reporter = Repoter(['epoch', 'iteration', 'train/loss', 'train/accuracy', 'eval/loss', 'eval/accuracy', 'elapsed_time'], writer,
-                       all_epoch=args.epochs, iter_per_epoch=len(train_loader))
+                       trigger=(args.log_interval, 'iteration'), all_epoch=args.epochs, iter_per_epoch=len(train_loader))
 
     # trainer = Trainer(model=model, optimizer=optimizer, device=device, writer=writer,
     #                   train_loader=train_loader, eval_loader=eval_loader)
@@ -155,7 +148,7 @@ def main():
         for iteration_idx in range(1, len(train_loader) + 1):
             step = iteration_idx + (epoch_idx - 1) * len(train_loader)
 
-            with reporter.scope(epoch_idx, step):
+            with reporter.scope(epoch_idx - 1, step):
                 train(model, device, train_iter, optimizer, reporter, step)
                 if step % args.eval_interval == 0:
                     # return

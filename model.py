@@ -74,7 +74,7 @@ class Unet(nn.Module):
 
         x0 = self.outconv(torch.cat((x0, self.upsamp0(x1)), dim=1))  # => 1, 768
         x0 = torch.sigmoid(x0)
-        return x0.squeeze()
+        return torch.squeeze(x0, dim=1)
 
 
 class UnetBlock(nn.Module):
@@ -110,8 +110,9 @@ class Unet2(Unet):
         self.upsamp1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
         self.up1 = UnetBlock(128, 64)
 
-        self.upsamp0 = nn.ConvTranspose2d(64, 64, kernel_size=3, stride=3)
+        self.upsamp0 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
         self.outconv = nn.Conv2d(64+32, 1, kernel_size=1)
+        self.resize = nn.ConvTranspose2d(1, 1, kernel_size=4, stride=2, padding=1)
 
     def forward(self, x):  # => 3, 256
         x0 = self.down0(x)  # => 32, 256
@@ -120,9 +121,10 @@ class Unet2(Unet):
 
         x3 = self.conv(F.max_pool2d(x2, 2))  # => 256, 32
 
-        x2 = self.up1(torch.cat((x2, self.upsamp2(x3)), dim=1))  # => 128, 128
+        x2 = self.up2(torch.cat((x2, self.upsamp2(x3)), dim=1))  # => 128, 128
         x1 = self.up1(torch.cat((x1, self.upsamp1(x2)), dim=1))  # => 64, 256
 
         x0 = self.outconv(torch.cat((x0, self.upsamp0(x1)), dim=1))  # => 1, 768
+        x0 = self.resize(x0)
         x0 = torch.sigmoid(x0)
-        return x0.squeeze()
+        return torch.squeeze(x0, dim=1)

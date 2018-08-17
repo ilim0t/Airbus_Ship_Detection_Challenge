@@ -76,7 +76,7 @@ class Unet(chainer.Chain):
 
         x0 = self.outconv(F.concat((x0, self.upsamp0(x1)), axis=1))  # => 1, 768
         x0 = F.sigmoid(x0)
-        return x0.squeeze()
+        return x0
 
 
 class UnetBlock(chainer.Chain):
@@ -116,6 +116,7 @@ class Unet2(Unet):
 
             self.upsamp0 = L.Deconvolution2D(64, 64, ksize=2, stride=2)
             self.outconv = L.Convolution2D(64+32, 1, ksize=1)
+            self.resize = L.Deconvolution2D(1, 1, ksize=4, stride=2, pad=1)
 
     def forward(self, x):  # => 3, 256, 386
         x0 = self.down0(x)  # => 32, 256, 386
@@ -128,5 +129,6 @@ class Unet2(Unet):
         x1 = self.up1(F.concat((x1, self.upsamp1(x2)), axis=1))  # => 64, 256
 
         x0 = self.outconv(F.concat((x0, self.upsamp0(x1)), axis=1))  # => 1, 768
+        x0 = self.resize(x0)
         x0 = F.sigmoid(x0)
-        return x0.squeeze()
+        return x0

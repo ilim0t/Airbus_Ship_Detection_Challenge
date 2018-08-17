@@ -18,6 +18,7 @@ class Repoter(object):
     def __init__(self, entries, writer: SummaryWriter, trigger=(1, 'epoch'), all_epoch=None, iter_per_epoch=None, out="result"):
         self.out = out
         self.log = [{}]
+        self.trigger = trigger
         self._log_len = 0
         self.writer = writer
         self._epoch, self._iteration = 0, 0
@@ -58,7 +59,12 @@ class Repoter(object):
             "iteration": self._iteration,
             "elapsed_time": time.time() - self._start
         })
-        self.print()
+        if self.trigger[1] == 'epoch':
+            if self._epoch % self.trigger[0] == 0:
+                self.print()
+        else:
+            if self._iteration % self.trigger[0] == 0:
+                self.print()
         self.progressbar()
         self.log.append({})
         return False
