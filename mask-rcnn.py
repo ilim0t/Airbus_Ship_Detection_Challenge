@@ -73,8 +73,11 @@ class MaskRCNNTrain(nn.Module):
         self.mask_rcnn = mask_rcnn
         self.n_sample = 128
         self.pos_ratio = 0.25
+        self.pos_iou_thresh = 0.5
+        self.neg_iou_thresh_hi = 0.5
+        self.neg_iou_thresh_lo = 0.0
 
-    def forward(self, x: torch.Tensor, bbox: Tuple[np.ndarray], label: Tuple[np.ndarray]):
+    def forward(self, x: torch.Tensor, gt_bboxes: Tuple[np.ndarray], masks: Tuple[np.ndarray]):
         # (ymin, xmin, ymax, xmax)
         # (y, x, h, w)
         # の順
@@ -90,26 +93,67 @@ class MaskRCNNTrain(nn.Module):
         h = F.relu(self.mask_rcnn.intermediate(features))
 
         # -1 -> features.size(2) * features.size(3) * self.n_anchor
-        score = self.mask_rcnn.cls(h).permute((0, 2, 3, 1)).contiguous().view((x.size(0), -1, 2))
-        offset = self.mask_rcnn.region(h).permute((0, 2, 3, 1)).contiguous().view((x.size(0), -1, 4))
+        scores = self.mask_rcnn.cls(h).permute((0, 2, 3, 1)).contiguous().view((x.size(0), -1, 2))
+        offsets = self.mask_rcnn.region(h).permute((0, 2, 3, 1)).contiguous().view((x.size(0), -1, 4))
 
-        for i, (s, o, b, l) in enumerate(zip(score, offset, bbox, label)):
-            roi = self.mask_rcnn.rpn(anchor, o, s, x.size(2), x.size(3))
-            self.target_roi(roi, b, l)
+        for i, (feature, score, offset, gt_bbox, gt_mask) in enumerate(zip(features, scores, offsets, gt_bboxes, masks)):
+            bbox, score_ = self.mask_rcnn.rpn(anchor, offset, score, x.size(2), x.size(3))  # scoreのメモリに上書きされる(無駄で冗長な処理)かも
+            bbox, gt_bbox, keep_index, pos_roi_per_this_image = self.target_roi(bbox, gt_bbox)
+            loc = self.cul_locloss(bbox, gt_bbox)
+            feature = self.roialign(feature, bbox)
 
-    def target_roi(self, roi, bbox, label):
-        pos_roi_per_image = np.round(self.n_sample * self.pos_ratio)
-        roi = roi.detach().numpy()
+    def roialign(self, feature: torch.Tensor, bbox) -> torch.Tensor:
+        return feature
 
-        roi = np.concatenate((roi, bbox))
+    def cul_iou(self, bbox: np.ndarray, gt_bbox: np.ndarray) -> np.ndarray:
+        tl = np.maximum(bbox[:, None, :2], gt_bbox[:, :2])  # [..., None, ...] は np.expand_dim(input, n) と等価
+        br = np.minimum(bbox[:, None, 2:], gt_bbox[:, 2:])
 
-        tl = np.maximum(roi[:, None, :2], bbox[:, :2])
-        br = np.minimum(roi[:, None, 2:], bbox[:, 2:])
+        cap = np.prod(br - tl, axis=2) * (tl < br).all(axis=2)
+        area = np.prod(bbox[:, 2:] - bbox[:, :2], axis=1)
+        gt_area = np.prod(gt_bbox[:, 2:] - gt_bbox[:, :2], axis=1)
+        iou = cap / (area[:, None] + gt_area - cap)
+        return iou
 
-        area_i = np.prod(br - tl, axis=2) * (tl < br).all(axis=2)
-        area_a = np.prod(roi[:, 2:] - roi[:, :2], axis=1)
-        area_b = np.prod(bbox[:, 2:] - bbox[:, :2], axis=1)
-        iou = area_i / (area_a[:, None] + area_b - area_i)
+    def cul_locloss(self, bbox: torch.Tensor, gt_bbox: torch.Tensor) -> torch.Tensor:
+        height = bbox[:, 2] - bbox[:, 0]
+        width = bbox[:, 3] - bbox[:, 1]
+
+        dy = (gt_bbox[:, 2] + gt_bbox[:, 0] - bbox[:, 2] - bbox[:, 0]) / 2 / height
+        dx = (gt_bbox[:, 3] + gt_bbox[:, 2] - bbox[:, 3] - bbox[:, 2]) / 2 / width
+        dh = torch.log(height - gt_bbox[:, 2] + gt_bbox[:, 0])
+        dw = torch.log(width - gt_bbox[:, 3] + gt_bbox[:, 1])
+
+        loc = torch.stack((dy, dx, dh, dw)).transpose(0, 1)
+        # ここでlocを正則化 / (0.1, 0.1, 0.2, 0.2)
+        return loc
+
+    def target_roi(self, bbox: torch.Tensor, gt_bbox: np.ndarray) -> \
+            Tuple[torch.Tensor, torch.Tensor, np.ndarray, int]:
+        # roi = np.concatenate((roi, bbox))
+        iou = self.cul_iou(bbox.detach().numpy(), gt_bbox)
+        gt_assignment = iou.argmax(axis=1)
+        max_iou = iou.max(axis=1)
+
+        pos_index = np.where(max_iou >= self.pos_iou_thresh)[0]
+        pos_roi_per_this_image = int(min(np.round(self.n_sample * self.pos_ratio), pos_index.size))
+        if pos_index.size > 0:
+            pos_index = np.random.choice(
+                pos_index, size=pos_roi_per_this_image, replace=False)
+
+        neg_index = np.where((max_iou < self.neg_iou_thresh_hi) & (max_iou >= self.neg_iou_thresh_lo))[0]
+        neg_roi_per_this_image = int(min(self.n_sample - pos_roi_per_this_image, neg_index.size))
+        if neg_index.size > 0:
+            neg_index = np.random.choice(
+                neg_index, size=neg_roi_per_this_image, replace=False)
+
+        keep_index = np.append(pos_index, neg_index)
+        # gt_roi_label = np.ones_like(gt_assignment)
+        # gt_roi_label[pos_roi_per_this_image:] = 0  # negative labels --> 0
+        bbox = bbox[keep_index]
+
+        gt_bbox = torch.from_numpy(gt_bbox[gt_assignment[keep_index]])
+        return bbox, gt_bbox, keep_index, pos_roi_per_this_image
 
 
 class MaskRCNN(nn.Module):
@@ -118,18 +162,18 @@ class MaskRCNN(nn.Module):
         self.extractor = models.vgg11(pretrained=True).features[:-1]
         for param in self.extractor.parameters():
             param.requires_grad = False
-        self.n_anchor = 9
-        self.intermediate = nn.Conv2d(512, 512, 3, 1, 1)
-        self.cls = nn.Conv2d(512, self.n_anchor * 2, 1, 1, 0)
-        self.region = nn.Conv2d(512, self.n_anchor * 4, 1, 1, 0)
-
         self.n_pre_nms = 12000
         self.nms_thresh = 0.7
         self.n_post_nms = 2000
         anchor_base = np.array([(np.sqrt(area/ratio), np.sqrt(area*ratio))
                                 # for ratio in (0.5, 1, 2) for area in (18000, 9000, 2000)], dtype=np.float32)
-                                for ratio in (0.5, 1, 2) for area in (18000/9, 9000/9, 2000/9)], dtype=np.float32)
+                                for ratio in (0.5, 1, 2) for area in (18000/9, 9000/9, 2000/9, 30)], dtype=np.float32)
+        self.n_anchor = len(anchor_base)
         self.anchor_base = np.concatenate((-anchor_base, anchor_base), axis=1)
+
+        self.intermediate = nn.Conv2d(512, 512, 3, 1, 1)
+        self.cls = nn.Conv2d(512, self.n_anchor * 2, 1, 1, 0)
+        self.region = nn.Conv2d(512, self.n_anchor * 4, 1, 1, 0)
 
     def forward(self, x):
         # (ymin, xmin, ymax, xmax)
@@ -151,18 +195,31 @@ class MaskRCNN(nn.Module):
         offset = self.region(h).permute((0, 2, 3, 1)).contiguous().view((x.size(0), -1, 4))
 
         for i, (s, o) in enumerate(zip(score, offset)):
-            roi = self.rpn(anchor, o, s, x.size(2), x.size(3))
+            bbox, score_ = self.rpn(anchor, o, s, x.size(2), x.size(3))
 
         # Head
         return x
 
-    def rpn(self, anchor, offset, score, h, w):
+    def rpn(self, anchor: np.ndarray, offset: torch.Tensor, score: torch.Tensor, h: int, w: int)\
+            -> Tuple[torch.Tensor, torch.Tensor]:
         offset = offset.to('cpu')
         score = score.to('cpu')
         # offset = offset.to('cpu')
         # offset, anchor, scoreをcpuに
 
-        roi = torch.empty(anchor.shape)
+        bbox = self.offset2bbox(offset, anchor, h, w)
+
+        # h = roi.detach().numpy()[:, 2] - roi.detach().numpy()[:, 0]
+        # w = roi.detach().numpy()[:, 3] - roi.detach().numpy()[:, 1]
+        # keep = np.where((h >= 10) & (w >= 10))[0]
+        # score, roi = score[:, keep], roi[keep]
+
+        bbox, score = self.nms(bbox, score)
+        # to(device)
+        return bbox, score
+
+    def offset2bbox(self, offset: torch.Tensor, anchor: np.ndarray, h: int, w: int) -> torch.Tensor:
+        bbox = torch.empty(anchor.shape)
         center_y = torch.from_numpy((anchor[:, 0] + anchor[:, 2]) / 2)
         center_x = torch.from_numpy((anchor[:, 1] + anchor[:, 3]) / 2)
         height = torch.from_numpy(anchor[:, 2] - anchor[:, 0])
@@ -172,31 +229,31 @@ class MaskRCNN(nn.Module):
         dh = 0.5 * torch.exp(dh)
         dw = 0.5 * torch.exp(dw)
 
-        roi[:, 0] = torch.clamp(center_y + height * (dy - dh), 0, h)
-        roi[:, 1] = torch.clamp(center_x + width * (dx - dw), 0, w)
-        roi[:, 2] = torch.clamp(center_y + height * (dy + dh), 0, h)
-        roi[:, 3] = torch.clamp(center_x + width * (dx + dw), 0, w)
+        bbox[:, 0] = torch.clamp(center_y + height * (dy - dh), 0, h)
+        bbox[:, 1] = torch.clamp(center_x + width * (dx - dw), 0, w)
+        bbox[:, 2] = torch.clamp(center_y + height * (dy + dh), 0, h)
+        bbox[:, 3] = torch.clamp(center_x + width * (dx + dw), 0, w)
+        return bbox
 
-        # h = roi.detach().numpy()[:, 2] - roi.detach().numpy()[:, 0]
-        # w = roi.detach().numpy()[:, 3] - roi.detach().numpy()[:, 1]
-        # keep = np.where((h >= 10) & (w >= 10))[0]
-        # score, roi = score[:, keep], roi[keep]
-
+    def nms(self, bbox: torch.Tensor, score: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         order = torch.topk(score[:, 1], min(score.size(0), self.n_pre_nms))[1]
-        roi = roi[order]
-        bbox = roi.detach().numpy()
-        bbox_area = np.prod(bbox[:, 2:] - bbox[:, :2], axis=1)
+        bbox = bbox[order]
+        score = score[order]
+        np_bbox = bbox.detach().numpy()
+        bbox_area = np.prod(np_bbox[:, 2:] - np_bbox[:, :2], axis=1)
         selec = []
-        for i, b in enumerate(bbox):
-            tl = np.maximum(b[:2], bbox[selec, :2])
-            br = np.minimum(b[2:], bbox[selec, 2:])
-            area = np.prod(br - tl, axis=1) * (tl < br).all(axis=1)
+        for i, b in enumerate(np_bbox):
+            tl = np.maximum(b[:2], np_bbox[selec, :2])
+            br = np.minimum(b[2:], np_bbox[selec, 2:])
+            cap = np.prod(br - tl, axis=1) * (tl < br).all(axis=1)
 
-            iou = area / (bbox_area[i] + bbox_area[selec] - area)
+            iou = cap / (bbox_area[i] + bbox_area[selec] - cap)
             if (iou < self.nms_thresh).all():
                 selec.append(i)
-        roi = roi[selec[:self.n_post_nms]]
-        return roi
+
+        bbox = bbox[selec[:self.n_post_nms]]
+        score = score[selec[:self.n_post_nms]]
+        return bbox, score
 
     def enumerate_shifted_anchor(self, input_size, features_size) -> np.ndarray:
         x_feat_stride = input_size[0] / features_size[0]
@@ -229,15 +286,15 @@ def main():
 
     use_cuda = not args.no_cuda and torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
-    torch.manual_seed(0)
+    torch.manual_seed(2)
 
     kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
 
     from skimage.transform import resize
     dataset = SatelliteImages(
         transform=transforms.Compose((
-            # transforms.Resize(256),
-            transforms.ToTensor(),)),
+            transforms.Resize(256),
+            transforms.ToTensor())),
         bbox_transform=lambda x: x / 3,
         mask_transform=lambda x: resize(x.transpose((1, 2, 0)), (256, 256), anti_aliasing=True).transpose((2, 0, 1)),
     )
