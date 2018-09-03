@@ -8,8 +8,9 @@ from collections import OrderedDict
 
 from dataset import SatelliteImages
 from tensorboardX import SummaryWriter
-from c_model import Net, Unet, Unet2
-from util import decode, Normalize
+from c_model import Net, Unet, Unet2, MaskRCNN
+from util import decode, Normalize, converter
+from chainercv.links import FasterRCNNVGG16
 
 import numpy as np
 import argparse
@@ -83,7 +84,9 @@ def main():
     args = parser.parse_args()
     print(json.dumps(args.__dict__, indent=2))
 
-    model = Net(Unet2())
+    faster_rcnn = FasterRCNNVGG16(n_fg_class=1, pretrained_model='imagenet')
+    faster_rcnn.use_preset('evaluate')
+    model = Net(MaskRCNN(faster_rcnn))
     if args.gpu >= 0:
         # Make a specified GPU current
         chainer.backends.cuda.get_device_from_id(args.gpu).use()
@@ -93,14 +96,14 @@ def main():
     optimizer.setup(model)
 
     dataset = SatelliteImages(".", transform=chainer.Sequential(
-                                     lambda img: img.resize((384, 384)),
+                                     # lambda img: img.resize((384, 384)),
                                      lambda img: np.asarray(img, dtype=np.float32).transpose((2, 0, 1)),
                                      Normalize(
                                          (0.2047899, 0.2887916, 0.3172972),
                                          (0.03384494, 0.02707603, 0.01996508))
                                  ),
-                                 target_transform=chainer.Sequential(
-                                     decode,
+                              mask_transform=chainer.Sequential(
+                                     decode
                                  ), on_server=(sys.platform == "linux"))
     train, test = chainer.datasets.split_dataset_random(dataset, len(dataset) - min(64*4, int(len(dataset) * 0.01)), seed=0)
 
@@ -108,7 +111,7 @@ def main():
     test_iter = chainer.iterators.SerialIterator(test, args.eval_batch_size if hasattr(args, "val_batch_size") else 5,
                                                  repeat=False, shuffle=False)
 
-    updater = chainer.training.updaters.StandardUpdater(train_iter, optimizer, device=args.gpu)
+    updater = chainer.training.updaters.StandardUpdater(train_iter, optimizer, converter=converter, device=args.gpu)
     trainer = chainer.training.Trainer(updater, (args.epochs, 'epoch'), out=args.out)
 
     trainer.extend(chainer.training.extensions.Evaluator(test_iter, model, device=args.gpu))

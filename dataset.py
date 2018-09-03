@@ -1,15 +1,18 @@
 #!/usr/bin/env python
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-# from util import *
+from util import decode
 import pandas
+import numpy as np
 
 import os
 from PIL import Image
 import glob
+import pickle
 
 
 class SatelliteImages(Dataset):
@@ -19,58 +22,69 @@ class SatelliteImages(Dataset):
     test_dir = "test"
     test_csv = "sample_submission.csv"
 
-    def __init__(self, root: str, train: bool=True, transform=transforms.ToTensor(), target_transform=None, on_server: bool=False):
+    train_pickle = "train_data.pickle"
+
+    def __init__(self, root: str='.', train: bool=True, transform=None, bbox_transform=None, mask_transform=None,
+                 on_server: bool=False):
         self.root = os.path.expanduser(root)
         self.transform = transform
-        self.target_transform = target_transform
+        self.bbox_transform = bbox_transform
+        self.mask_transform = mask_transform
         self.train = train
 
         if self.train:
-            self.train_data = pandas.read_csv(os.path.join(self.root, self.processed_folder, self.train_csv))
-            self.train_data = list(zip(self.train_data["ImageId"], self.train_data["EncodedPixels"]))
+            train_csv = pandas.read_csv(os.path.join(self.root, self.processed_folder, self.train_csv))
+
+            if os.path.isfile(self.train_pickle):
+                with open(self.train_pickle, "rb") as f:
+                    self.data = pickle.load(f)
+            else:
+                train_data = {}
+                for image_id, encoded_pixel in zip(train_csv["ImageId"], train_csv["EncodedPixels"]):
+                    if encoded_pixel is np.nan:
+                        train_data[image_id] = ()
+                    else:
+                        train_data[image_id] = (*train_data.get(image_id, ()), tuple(int(num) for num in encoded_pixel.split()))
+                self.data = tuple(train_data.items())
+
+                with open(self.train_pickle, "wb") as f:
+                    pickle.dump(self.data, f)
+
             if not on_server:
-                files = [os.path.basename(i) for i in
-                        glob.glob(os.path.join(self.root, self.processed_folder, self.train_dir, "*"))]
-                self.train_data = list(filter(lambda x: x[0] in files, self.train_data))
+                    all_train_data = dict(self.data)
+                    train_data = {}
+                    for file in [os.path.basename(i) for i in
+                                 glob.glob(os.path.join(self.root, self.processed_folder, self.train_dir, "*"))]:
+                        train_data[file] = all_train_data[file]
+                    self.data = tuple(train_data.items())
         else:
-            self.test_data = list(pandas.read_csv(os.path.join(self.root, self.processed_folder, self.test_csv))["ImageId"])
+            self.data = tuple(pandas.read_csv(os.path.join(self.root, self.processed_folder, self.test_csv))["ImageId"])
 
     def __getitem__(self, index):
         if self.train:
-            img, target = self.train_data[index]
+            img, target = self.data[index]
             img = Image.open(os.path.join(self.root, self.processed_folder, self.train_dir, img))
+            bbox, mask = decode(target)
         else:
-            img = self.test_data[index]
+            img = self.data[index]
             img = Image.open(os.path.join(self.root, self.processed_folder, self.test_dir, img))
 
         if self.transform is not None:
             img = self.transform(img)
 
-        if self.train and self.target_transform is not None:
-            target = self.target_transform(target)
+        if self.train and self.bbox_transform is not None:
+            bbox = self.bbox_transform(bbox)
+
+        if self.train and self.mask_transform is not None:
+            mask = self.mask_transform(mask)
 
         if self.train:
-            return img, target
+            return img, bbox, mask
         else:
             return img
 
     def __len__(self):
-        if self.train:
-            return len(self.train_data)
-        else:
-            return len(self.test_data)
-
-    def __repr__(self):
-        fmt_str = 'Dataset ' + self.__class__.__name__ + '\n'
-        fmt_str += '    Number of datapoints: {}\n'.format(self.__len__())
-        tmp = 'train' if self.train is True else 'test'
-        fmt_str += '    Split: {}\n'.format(tmp)
-        fmt_str += '    Root Location: {}\n'.format(self.root)
-        tmp = '    Transforms (if any): '
-        fmt_str += '{0}{1}\n'.format(tmp, self.transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
-        tmp = '    Target Transforms (if any): '
-        fmt_str += '{0}{1}'.format(tmp, self.target_transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
-        return fmt_str
+        return len(self.data)
 
 
 if __name__ == "__main__":
