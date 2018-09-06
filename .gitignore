@@ -9,3 +9,4 @@ mnist
 cg.png
 runs
 example
+*.pickle

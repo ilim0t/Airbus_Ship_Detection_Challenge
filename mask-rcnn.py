@@ -97,13 +97,31 @@ class MaskRCNNTrain(nn.Module):
         offsets = self.mask_rcnn.region(h).permute((0, 2, 3, 1)).contiguous().view((x.size(0), -1, 4))
 
         for i, (feature, score, offset, gt_bbox, gt_mask) in enumerate(zip(features, scores, offsets, gt_bboxes, masks)):
-            bbox, score_ = self.mask_rcnn.rpn(anchor, offset, score, x.size(2), x.size(3))  # scoreのメモリに上書きされる(無駄で冗長な処理)かも
-            bbox, gt_bbox, keep_index, pos_roi_per_this_image = self.target_roi(bbox, gt_bbox)
-            loc = self.cul_locloss(bbox, gt_bbox)
-            feature = self.roialign(feature, bbox)
+            # nms
+            # scoreのメモリに上書きされる(無駄で冗長な処理)かも
+            offset, score, roi = self.mask_rcnn.rpn(anchor, offset, score, x.size(2), x.size(3))
 
-    def roialign(self, feature: torch.Tensor, bbox) -> torch.Tensor:
-        return feature
+            # neg, posからの選択
+            sampled_roi, nearest_gt_bbox, gt_corresponded_label, sampled_loc = self.proposal_target_creator(roi, gt_bbox)
+
+            head_cls_loc, head_score, mask = self.mask_rcnn.head(feature, sampled_roi, x.shape[2:])
+
+            gt_loc, gt_corresponded_label2 = self.anchor_target_creator(anchor, gt_bbox, x.shape[2:])
+
+            rpn_loc_loss = self.loc_loss(offset, gt_loc, gt_corresponded_label2)
+            rpn_cls_loss = F.cross_entropy(score, gt_corresponded_label2)
+            roi_loc_loss = self.loc_loss(head_cls_loc[np.arange(len(head_cls_loc)), gt_corresponded_label], sampled_loc, gt_corresponded_label)
+            roi_cls_loss = F.cross_entropy(head_score, gt_corresponded_label)
+
+            loss = rpn_loc_loss + rpn_cls_loss + roi_loc_loss + roi_cls_loss
+
+    # def roialign(self, feature: torch.Tensor, bbox: np.ndarray, x_size: Tuple[int]) -> torch.Tensor:
+    #     ret = torch.empty((bbox.shape[0], feature.size(0), 7, 7))
+    #     bbox = np.hstack((np.floor(bbox[:, :2] * feature.size(1) / x_size[0]),
+    #                      np.ceil(bbox[:, 2:] * feature.size(2) / x_size[1]))).astype(int)
+    #     for i, b in enumerate(bbox):
+    #         ret[i] = self.mask_rcnn.roi(feature[:, b[0]:b[2], b[1]:b[3]].unsqueeze(0)).squeeze(0)
+    #     return ret
 
     def cul_iou(self, bbox: np.ndarray, gt_bbox: np.ndarray) -> np.ndarray:
         tl = np.maximum(bbox[:, None, :2], gt_bbox[:, :2])  # [..., None, ...] は np.expand_dim(input, n) と等価
@@ -115,7 +133,7 @@ class MaskRCNNTrain(nn.Module):
         iou = cap / (area[:, None] + gt_area - cap)
         return iou
 
-    def cul_locloss(self, bbox: torch.Tensor, gt_bbox: torch.Tensor) -> torch.Tensor:
+    def cul_loc(self, bbox: torch.Tensor, gt_bbox: torch.Tensor) -> torch.Tensor:
         height = bbox[:, 2] - bbox[:, 0]
         width = bbox[:, 3] - bbox[:, 1]
 
@@ -128,8 +146,9 @@ class MaskRCNNTrain(nn.Module):
         # ここでlocを正則化 / (0.1, 0.1, 0.2, 0.2)
         return loc
 
-    def target_roi(self, bbox: torch.Tensor, gt_bbox: np.ndarray) -> \
-            Tuple[torch.Tensor, torch.Tensor, np.ndarray, int]:
+    def proposal_target_creator(self, bbox: torch.Tensor, gt_bbox: np.ndarray) \
+            -> Tuple[torch.Tensor, torch.Tensor, np.ndarray, torch.Tensor]:
+        # proposal_target_creator相当
         # roi = np.concatenate((roi, bbox))
         iou = self.cul_iou(bbox.detach().numpy(), gt_bbox)
         gt_assignment = iou.argmax(axis=1)
@@ -148,12 +167,13 @@ class MaskRCNNTrain(nn.Module):
                 neg_index, size=neg_roi_per_this_image, replace=False)
 
         keep_index = np.append(pos_index, neg_index)
-        # gt_roi_label = np.ones_like(gt_assignment)
-        # gt_roi_label[pos_roi_per_this_image:] = 0  # negative labels --> 0
+        gt_label = np.ones_like(keep_index)
+        gt_label[pos_roi_per_this_image:] = 0  # negative labels --> 0
         bbox = bbox[keep_index]
 
         gt_bbox = torch.from_numpy(gt_bbox[gt_assignment[keep_index]])
-        return bbox, gt_bbox, keep_index, pos_roi_per_this_image
+        loc = self.cul_loc(bbox, gt_bbox)
+        return bbox, gt_bbox, gt_label, loc
 
 
 class MaskRCNN(nn.Module):
@@ -174,6 +194,10 @@ class MaskRCNN(nn.Module):
         self.intermediate = nn.Conv2d(512, 512, 3, 1, 1)
         self.cls = nn.Conv2d(512, self.n_anchor * 2, 1, 1, 0)
         self.region = nn.Conv2d(512, self.n_anchor * 4, 1, 1, 0)
+
+        self.roi = nn.UpsamplingBilinear2d((7, 7))
+        self.conv = nn.Conv2d(512, 256, 3, 1, 1)
+        self.deconv = nn.UpsamplingBilinear2d(scale_factor=2)
 
     def forward(self, x):
         # (ymin, xmin, ymax, xmax)
@@ -201,7 +225,8 @@ class MaskRCNN(nn.Module):
         return x
 
     def rpn(self, anchor: np.ndarray, offset: torch.Tensor, score: torch.Tensor, h: int, w: int)\
-            -> Tuple[torch.Tensor, torch.Tensor]:
+            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # faster_rcnn.rpn 相当
         offset = offset.to('cpu')
         score = score.to('cpu')
         # offset = offset.to('cpu')
@@ -214,9 +239,9 @@ class MaskRCNN(nn.Module):
         # keep = np.where((h >= 10) & (w >= 10))[0]
         # score, roi = score[:, keep], roi[keep]
 
-        bbox, score = self.nms(bbox, score)
+        bbox, score, offset = self.nms(bbox, score, offset)
         # to(device)
-        return bbox, score
+        return offset, score, bbox
 
     def offset2bbox(self, offset: torch.Tensor, anchor: np.ndarray, h: int, w: int) -> torch.Tensor:
         bbox = torch.empty(anchor.shape)
@@ -235,7 +260,7 @@ class MaskRCNN(nn.Module):
         bbox[:, 3] = torch.clamp(center_x + width * (dx + dw), 0, w)
         return bbox
 
-    def nms(self, bbox: torch.Tensor, score: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def nms(self, bbox: torch.Tensor, score: torch.Tensor, offset: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         order = torch.topk(score[:, 1], min(score.size(0), self.n_pre_nms))[1]
         bbox = bbox[order]
         score = score[order]
@@ -253,7 +278,8 @@ class MaskRCNN(nn.Module):
 
         bbox = bbox[selec[:self.n_post_nms]]
         score = score[selec[:self.n_post_nms]]
-        return bbox, score
+        offset = offset[selec[:self.n_post_nms]]
+        return bbox, score, offset
 
     def enumerate_shifted_anchor(self, input_size, features_size) -> np.ndarray:
         x_feat_stride = input_size[0] / features_size[0]
