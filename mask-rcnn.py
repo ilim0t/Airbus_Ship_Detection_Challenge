@@ -17,11 +17,10 @@ from util import decode, show
 
 def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
-    for batch_idx, (data, bbox, mask) in enumerate(train_loader): # data, (bboxs, masks)
+    for batch_idx, (data, bbox, mask) in enumerate(train_loader):  # data, (bboxs, masks)
         data = data.to(device)
         optimizer.zero_grad()
-        output = model(data, bbox, mask)
-        loss = 0
+        loss = model(data, bbox, mask)
         loss.backward()
         optimizer.step()
         if batch_idx % args.log_interval == 0:
@@ -87,7 +86,7 @@ class MaskRCNNTrain(nn.Module):
         neg_iou_thresh = 0.3
         pos_ratio = 0.5
 
-    def forward(self, x: torch.Tensor, gt_bboxes: Tuple[np.ndarray], masks: Tuple[np.ndarray]):
+    def forward(self, x: torch.Tensor, gt_bboxes: Tuple[np.ndarray], gt_masks: Tuple[np.ndarray]):
         # (ymin, xmin, ymax, xmax)
         # (y, x, h, w)
         # の順
@@ -95,72 +94,84 @@ class MaskRCNNTrain(nn.Module):
 
         # Backbone, Extractor
         features = self.mask_rcnn.extractor(x)
+        features.requires_grad = True
 
         assert x.size(2) % features.size(2) == x.size(3) % features.size(3) == 0
         # RPN
         anchor = self.mask_rcnn.enumerate_shifted_anchor(x.shape[2:], features.shape[2:])
         h = F.relu(self.mask_rcnn.intermediate(features))
-        # -1 -> features.size(2) * features.size(3) * self.n_anchor
         scores = self.mask_rcnn.cls(h).permute((0, 2, 3, 1)).contiguous().view((x.size(0), -1, 2))
         offsets = self.mask_rcnn.region(h).permute((0, 2, 3, 1)).contiguous().view((x.size(0), -1, 4))
 
-        for i, (feature, score, offset, gt_bbox, gt_mask) in enumerate(zip(features, scores, offsets, gt_bboxes, masks)):
-            # nms
-            # scoreのメモリに上書きされる(無駄で冗長な処理)かも
-            offset, score, roi = self.mask_rcnn.rpn(anchor, offset, score, x.size(2), x.size(3))
+        for i, (feature, score, offset, gt_bbox, gt_mask) in enumerate(zip(features, scores, offsets, gt_bboxes, gt_masks)):
+            gt_bbox = torch.from_numpy(gt_bbox)
+            gt_mask = torch.from_numpy(gt_mask)
 
-            sampled_roi, nearest_gt_bbox, gt_corresponded_label, sampled_loc = self.proposal_target_creator(roi, gt_bbox)
-            head_cls_loc, head_score, mask = self.mask_rcnn.head(feature, sampled_roi.detach().numpy(), x.shape[2:])
-            gt_loc, gt_corresponded_label2 = self.anchor_target_creator(anchor, gt_bbox, x.shape[2:])
+            roi = self.mask_rcnn.rpn(anchor, offset, score.detach(), x.shape[2:4])
+            sampled_roi, sampled_loc, gt_roi_label, gt_roi_mask = self.proposal_target_creator(roi, gt_bbox, gt_mask, x.shape[2:])
+            head_cls_loc, head_score, mask = self.mask_rcnn.head(feature, sampled_roi.detach(), x.shape[2:])
+            gt_loc_with_anchor, gt_rpn_label = self.anchor_target_creator(anchor, gt_bbox, x.shape[2:])
 
-            rpn_loc_loss = self.loc_loss(offset, gt_loc, gt_corresponded_label2)
-            rpn_cls_loss = F.cross_entropy(score, gt_corresponded_label2)
-            roi_loc_loss = self.loc_loss(head_cls_loc[np.arange(len(head_cls_loc)), gt_corresponded_label], sampled_loc, gt_corresponded_label)
-            roi_cls_loss = F.cross_entropy(head_score, gt_corresponded_label)
+            rpn_loc_loss = self.loc_loss(offset, gt_loc_with_anchor, gt_rpn_label)
+            rpn_cls_loss = F.cross_entropy(score, gt_rpn_label, ignore_index=-1)
+            roi_loc_loss = self.loc_loss(head_cls_loc[np.arange(len(head_cls_loc)), gt_roi_label],
+                                         sampled_loc, gt_roi_label)
+            roi_cls_loss = F.cross_entropy(head_score, gt_roi_label, ignore_index=-1)
+            mask_loss = F.cross_entropy(mask, gt_roi_mask)
 
-            loss = rpn_loc_loss + rpn_cls_loss + roi_loc_loss + roi_cls_loss
+            loss = rpn_loc_loss + rpn_cls_loss + roi_loc_loss + roi_cls_loss + mask_loss
+        return loss
 
-    def calc_iou(self, bbox: np.ndarray, gt_bbox: np.ndarray) -> np.ndarray:
-        tl = np.maximum(bbox[:, None, :2], gt_bbox[:, :2])  # [..., None, ...] は np.expand_dim(input, n) と等価
-        br = np.minimum(bbox[:, None, 2:], gt_bbox[:, 2:])
+    def calc_iou(self, bbox: torch.Tensor, gt_bbox: torch.Tensor) -> torch.Tensor:
+        assert not bbox.requires_grad
+        assert not bbox.requires_grad
 
-        cap = np.prod(br - tl, axis=2) * (tl < br).all(axis=2)
-        area = np.prod(bbox[:, 2:] - bbox[:, :2], axis=1)
-        gt_area = np.prod(gt_bbox[:, 2:] - gt_bbox[:, :2], axis=1)
-        iou = cap / (area[:, None] + gt_area - cap)
+        tl = torch.max(bbox[:, None, :2], gt_bbox[:, :2])  # [..., None, ...] は np.expand_dim(input, n) と等価
+        br = torch.min(bbox[:, None, 2:], gt_bbox[:, 2:])
+
+        cap = torch.where((tl < br).all(2), (br - tl).prod(2), torch.zeros(1))
+        area = (bbox[:, 2:] - bbox[:, :2]).prod(1)
+        gt_area = (gt_bbox[:, 2:] - gt_bbox[:, :2]).prod(1)
+        iou = cap / (area.unsqueeze(1) + gt_area - cap)
         return iou
 
     def bbox2loc(self, bbox: torch.Tensor, gt_bbox: torch.Tensor) -> torch.Tensor:
+        assert not bbox.requires_grad
+        assert not gt_bbox.requires_grad
+
         height = bbox[:, 2] - bbox[:, 0]
         width = bbox[:, 3] - bbox[:, 1]
 
         dy = (gt_bbox[:, 2] + gt_bbox[:, 0] - bbox[:, 2] - bbox[:, 0]) / 2 / height
         dx = (gt_bbox[:, 3] + gt_bbox[:, 2] - bbox[:, 3] - bbox[:, 2]) / 2 / width
-        dh = torch.log(height - gt_bbox[:, 2] + gt_bbox[:, 0])
-        dw = torch.log(width - gt_bbox[:, 3] + gt_bbox[:, 1])
+        dh = torch.log((gt_bbox[:, 2] - gt_bbox[:, 0]) / height)
+        dw = torch.log((gt_bbox[:, 3] - gt_bbox[:, 1]) / width)
 
-        loc = torch.stack((dy, dx, dh, dw)).transpose(0, 1)
+        loc = torch.stack((dy, dx, dh, dw), dim=1)
         return loc
 
-    def np_bbox2loc(self, bbox: np.ndarray, gt_bbox: np.ndarray) -> np.ndarray:
-        height = bbox[:, 2] - bbox[:, 0]
-        width = bbox[:, 3] - bbox[:, 1]
+    def loc_loss(self, loc: torch.Tensor, gt_loc: torch.Tensor, gt_label: torch.Tensor, sigma: float=1.) \
+            -> torch.Tensor:
+        assert loc.requires_grad
+        assert not gt_loc.requires_grad
+        assert not gt_label.requires_grad
 
-        dy = (gt_bbox[:, 2] + gt_bbox[:, 0] - bbox[:, 2] - bbox[:, 0]) / 2 / height
-        dx = (gt_bbox[:, 3] + gt_bbox[:, 2] - bbox[:, 3] - bbox[:, 2]) / 2 / width
-        dh = np.log(height - gt_bbox[:, 2] + gt_bbox[:, 0])
-        dw = np.log(width - gt_bbox[:, 3] + gt_bbox[:, 1])
+        sigma2 = sigma ** 2
+        diff = (loc - gt_loc)
+        abs_diff = diff.abs()
+        loss = torch.where(gt_label >= 0, torch.where(
+            abs_diff < 1 / sigma2, diff.pow(2) * sigma2 / 2, abs_diff - 0.5 / sigma2).sum(1), torch.zeros(1)).sum() / \
+            (gt_label >= 0).sum().float()
+        return loss
 
-        loc = np.stack((dy, dx, dh, dw)).transpose(0, 1)
-        return loc
+    def proposal_target_creator(self, bbox: torch.Tensor, gt_bbox: torch.Tensor, gt_mask: torch.Tensor, size: Tuple[int, int]) \
+            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert bbox.requires_grad
+        assert not gt_bbox.requires_grad
+        # bbox = torch.cat((bbox, gt_bbox))
 
-    def proposal_target_creator(self, bbox: torch.Tensor, gt_bbox: np.ndarray) \
-            -> Tuple[torch.Tensor, torch.Tensor, np.ndarray, torch.Tensor]:
-        # proposal_target_creator相当
-        # roi = np.concatenate((roi, bbox))
-        iou = self.calc_iou(bbox.detach().numpy(), gt_bbox)
-        gt_assignment = iou.argmax(axis=1)
-        max_iou = iou.max(axis=1)
+        iou = self.calc_iou(bbox.detach(), gt_bbox)
+        max_iou, gt_assignment = iou.max(dim=1)
 
         pos_index = np.where(max_iou >= self.pos_iou_thresh)[0]
         pos_roi_per_this_image = int(min(np.round(self.n_sample * self.pos_ratio), pos_index.size))
@@ -174,18 +185,32 @@ class MaskRCNNTrain(nn.Module):
             neg_index = np.random.choice(
                 neg_index, size=neg_roi_per_this_image, replace=False)
 
-        keep_index = np.append(pos_index, neg_index)
-        gt_label = np.ones_like(keep_index)
-        gt_label[pos_roi_per_this_image:] = 0  # negative labels --> 0
-        bbox = bbox[keep_index]
+        keep = np.append(pos_index, neg_index)
+        gt_label = torch.cat((torch.ones(pos_roi_per_this_image, dtype=torch.long),
+                              torch.zeros(neg_roi_per_this_image, dtype=torch.long)))
 
-        gt_bbox = torch.from_numpy(gt_bbox[gt_assignment[keep_index]])
-        loc = self.bbox2loc(bbox, gt_bbox)
+        gt_assignment = gt_assignment[keep]
+        bbox = bbox[keep]
+        gt_bbox = gt_bbox[gt_assignment]
+        gt_mask = gt_mask[gt_assignment]
+
+        loc = self.bbox2loc(bbox.detach(), gt_bbox[gt_assignment])
         loc = loc / torch.Tensor([0.1, 0.1, 0.2, 0.2])
-        return bbox, gt_bbox, gt_label, loc
 
-    def anchor_target_creator(self, anchor: np.ndarray, bbox: np.ndarray, size: Tuple[int, int]) \
-            -> Tuple[np.ndarray, np.ndarray]:
+        sample = torch.cat((torch.zeros(bbox.size(0)).unsqueeze(1), bbox.detach()), dim=1)
+        gt_pooled_mask = self.mask_rcnn.pooling(gt_mask.unsqueeze(1), sample, 7 * 2, size).squeeze(1).long()  # 256に縮小しているので小数がある longにするとそれが失われる
+        """
+        show(gt_mask[0]), show(gt_mask[1])
+        gt_pooled_mask = self.mask_rcnn.pooling(gt_mask.unsqueeze(1), torch.cat((torch.zeros(gt_bbox.size(0)).unsqueeze(1), gt_bbox), dim=1), 7, size).squeeze(1)
+        show(gt_pooled_mask[0]), show(gt_pooled_mask[1])
+        """
+        return bbox, loc, gt_label, gt_pooled_mask
+
+    def anchor_target_creator(self, anchor: torch.Tensor, bbox: torch.Tensor, size: Tuple[int, int]) \
+            -> Tuple[torch.Tensor, torch.Tensor]:
+        assert not anchor.requires_grad
+        assert not bbox.requires_grad
+        # anchor = torch.cat((anchor, bbox))
 
         n_sample = 256
         pos_iou_thresh = 0.7
@@ -193,30 +218,23 @@ class MaskRCNNTrain(nn.Module):
         pos_ratio = 0.5
 
         n_anchor = len(anchor)
+        np_anchor = anchor.numpy()
 
-        keep = np.where((0 <= anchor[:, 0]) & (0 <= anchor[:, 1]) & (anchor[:, 2] <= size[0]) & (anchor[:, 3] <= size[1]))[0]
+        keep = np.where((0 <= np_anchor[:, 0]) & (0 <= np_anchor[:, 1]) &
+                        (np_anchor[:, 2] <= size[0]) & (np_anchor[:, 3] <= size[1]))[0]
         anchor = anchor[keep]
 
-        label = np.empty((len(keep), ), dtype=np.int32)
-        label.fill(-1)
+        label = - torch.ones(keep.shape, dtype=torch.long)
 
         ious = self.calc_iou(anchor, bbox)
-        argmax_ious = ious.argmax(axis=1)
-        max_ious = ious[np.arange(len(anchor)), argmax_ious]
-        gt_argmax_ious = ious.argmax(axis=0)
-        gt_max_ious = ious[gt_argmax_ious, np.arange(ious.shape[1])]
+        max_ious, argmax_ious = ious.max(1)
+        gt_max_ious, gt_argmax_ious = ious.max(0)
         gt_argmax_ious = np.where(ious == gt_max_ious)[0]
 
-        # assign negative labels first so that positive labels can clobber them
         label[max_ious < neg_iou_thresh] = 0
-
-        # positive label: for each gt, anchor with highest iou
         label[gt_argmax_ious] = 1
-
-        # positive label: above threshold IOU
         label[max_ious >= pos_iou_thresh] = 1
 
-        # subsample positive labels if we have too many
         n_pos = int(pos_ratio * n_sample)
         pos_index = np.where(label == 1)[0]
         if len(pos_index) > n_pos:
@@ -224,28 +242,25 @@ class MaskRCNNTrain(nn.Module):
                 pos_index, size=(len(pos_index) - n_pos), replace=False)
             label[disable_index] = -1
 
-        # subsample negative labels if we have too many
-        n_neg = n_sample - np.sum(label == 1)
+        n_neg = n_sample - torch.sum(label == 1).item()
         neg_index = np.where(label == 0)[0]
         if len(neg_index) > n_neg:
             disable_index = np.random.choice(
                 neg_index, size=(len(neg_index) - n_neg), replace=False)
             label[disable_index] = -1
 
-        loc = self.np_bbox2loc(anchor, bbox[argmax_ious])
+        loc = self.bbox2loc(anchor, bbox[argmax_ious])
 
         label = self._unmap(label, n_anchor, keep, fill=-1)
         loc = self._unmap(loc, n_anchor, keep, fill=0)
         return loc, label
 
-    def _unmap(self, data, count, index, fill=0):
+    def _unmap(self, data: torch.Tensor, count: int, index: np.ndarray, fill: float=0):
         if len(data.shape) == 1:
-            ret = np.empty((count,), dtype=data.dtype)
-            ret.fill(fill)
+            ret = torch.empty(count, dtype=data.dtype).fill_(fill)
             ret[index] = data
         else:
-            ret = np.empty((count,) + data.shape[1:], dtype=data.dtype)
-            ret.fill(fill)
+            ret = torch.empty((count,) + data.shape[1:], dtype=data.dtype).fill_(fill)
             ret[index, :] = data
         return ret
 
@@ -259,11 +274,13 @@ class MaskRCNN(nn.Module):
         self.n_pre_nms = 12000
         self.nms_thresh = 0.7
         self.n_post_nms = 2000
-        anchor_base = np.array([(np.sqrt(area/ratio), np.sqrt(area*ratio))
+        anchor_base = np.array([(np.sqrt(area / ratio) / 2, np.sqrt(area * ratio) / 2)
                                 # for ratio in (0.5, 1, 2) for area in (18000, 9000, 2000)], dtype=np.float32)
-                                for ratio in (0.5, 1, 2) for area in (18000/9, 9000/9, 2000/9, 30)], dtype=np.float32)
+                                # for ratio in (0.5, 1, 2) for area in (18000/9, 9000/9, 2000/9, 30)], dtype=np.float32)
+                                for ratio in (1,) for area in (200, 4000, 10000)], dtype=np.float32)
+
         self.n_anchor = len(anchor_base)
-        self.anchor_base = np.concatenate((-anchor_base, anchor_base), axis=1)
+        self.anchor_base = torch.from_numpy(np.concatenate((-anchor_base, anchor_base), axis=1))
 
         # RPN
         self.intermediate = nn.Conv2d(512, 512, 3, 1, 1)
@@ -307,26 +324,33 @@ class MaskRCNN(nn.Module):
         # Head
         return x
 
-    def rpn(self, anchor: np.ndarray, offset: torch.Tensor, score: torch.Tensor, h: int, w: int)\
-            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def rpn(self, anchor: torch.Tensor, offset: torch.Tensor, score: torch.Tensor, size: Tuple[int, int]) \
+            -> torch.Tensor:
+        assert not anchor.requires_grad
+        assert offset.requires_grad
+        assert not score.requires_grad
 
-        bbox = self.offset2bbox(offset, anchor, h, w)
+        bbox = self.offset2bbox(offset, anchor, size)
 
         # h = roi.detach().numpy()[:, 2] - roi.detach().numpy()[:, 0]
         # w = roi.detach().numpy()[:, 3] - roi.detach().numpy()[:, 1]
         # keep = np.where((h >= 10) & (w >= 10))[0]
         # score, roi = score[:, keep], roi[keep]
 
-        bbox, score, offset = self.nms(bbox, score, offset)
-        return offset, score, bbox
+        bbox = self.nms(bbox, score)
+        return bbox
 
-    def head(self, x: torch.Tensor, sampled_roi: np.ndarray, size: Tuple[int, int]) \
+    def head(self, x: torch.Tensor, sampled_roi: torch.Tensor, size: Tuple[int, int]) \
             -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        sampled_roi = np.concatenate((sampled_roi, np.zeros((sampled_roi.shape[0], 1), dtype=np.float32)), axis=1)
-        pool = self.pooling(x.unsqueeze(0), sampled_roi, 7, size)
+        assert x.requires_grad
+        assert not sampled_roi.requires_grad
+
+        sampled_roi = torch.cat((torch.zeros(sampled_roi.size(0)).unsqueeze(1), sampled_roi), dim=1)
+        pool = self.pooling(x.expand(128, -1, -1, -1), sampled_roi, 7, size)
+
         h = F.relu(self.fc6(pool.flatten(1)))
         h = F.relu(self.fc7(h))
-        roi_cls_locs = self.cls_loc(h)
+        roi_cls_locs = self.cls_loc(h).view(-1, 2, 4)
         roi_scores = self.score(h)
 
         h = F.relu(self.conv1_1(pool))
@@ -336,17 +360,19 @@ class MaskRCNN(nn.Module):
         roi_mask = self.conv2_2(h)
         return roi_cls_locs, roi_scores, roi_mask
 
-    def pooling(self, x: torch.Tensor, bbox: np.ndarray, pool_size: int=7, origin_size=(256, 256)) -> torch.Tensor:
+    def pooling(self, x: torch.Tensor, bbox: torch.Tensor, pool_size: int=7, origin_size=(256, 256)) -> torch.Tensor:
+        # assert x.requires_grad
+        assert not bbox.requires_grad
+
         height = x.size(2)
         width = x.size(3)
 
-        top = torch.from_numpy(bbox[:, 1::4] / origin_size[0] * height)
-        left = torch.from_numpy(bbox[:, 2::4] / origin_size[1] * width)
-        bottom = torch.from_numpy(bbox[:, 3::4] / origin_size[0] * height)
-        right = torch.from_numpy(bbox[:, 4::4] / origin_size[1] * width)
+        top = bbox[:, 1::4] / origin_size[0] * height
+        left = bbox[:, 2::4] / origin_size[1] * width
+        bottom = bbox[:, 3::4] / origin_size[0] * height
+        right = bbox[:, 4::4] / origin_size[1] * width
 
-        # affine theta
-        zero = torch.zeros(bbox.shape[0], 1)
+        zero = torch.zeros(bbox.size(0)).unsqueeze(1)
         theta = torch.cat([
             (bottom - top) / (width - 1),
             zero,
@@ -357,58 +383,66 @@ class MaskRCNN(nn.Module):
         ], 1).view(-1, 2, 3)
 
         grid = F.affine_grid(theta, torch.Size((bbox.shape[0], 1, pool_size, pool_size)))
-        crops = F.grid_sample(x.expand(bbox.shape[0], *x.shape[1:]), grid)
+        crops = F.grid_sample(x, grid)
         return crops
 
-    def offset2bbox(self, offset: torch.Tensor, anchor: np.ndarray, h: int, w: int) -> torch.Tensor:
-        bbox = torch.empty(anchor.shape)
-        center_y = torch.from_numpy((anchor[:, 0] + anchor[:, 2]) / 2)
-        center_x = torch.from_numpy((anchor[:, 1] + anchor[:, 3]) / 2)
-        height = torch.from_numpy(anchor[:, 2] - anchor[:, 0])
-        width = torch.from_numpy(anchor[:, 3] - anchor[:, 1])
+    def offset2bbox(self, offset: torch.Tensor, anchor: torch.Tensor, size: Tuple[int, int]) -> torch.Tensor:  # checked
+        assert offset.requires_grad
+        assert not anchor.requires_grad
+
+        center_y = (anchor[:, 0] + anchor[:, 2]) / 2
+        center_x = (anchor[:, 1] + anchor[:, 3]) / 2
+        height = anchor[:, 2] - anchor[:, 0]
+        width = anchor[:, 3] - anchor[:, 1]
 
         dy, dx, dh, dw = offset.unbind(1)
         dh = 0.5 * torch.exp(dh)
         dw = 0.5 * torch.exp(dw)
 
-        bbox[:, 0] = torch.clamp(center_y + height * (dy - dh), 0, h)
-        bbox[:, 1] = torch.clamp(center_x + width * (dx - dw), 0, w)
-        bbox[:, 2] = torch.clamp(center_y + height * (dy + dh), 0, h)
-        bbox[:, 3] = torch.clamp(center_x + width * (dx + dw), 0, w)
+        bbox = torch.stack((torch.clamp(center_y + height * (dy - dh), 0, size[0]),
+                            torch.clamp(center_x + width * (dx - dw), 0, size[1]),
+                            torch.clamp(center_y + height * (dy + dh), 0, size[0]),
+                            torch.clamp(center_x + width * (dx + dw), 0, size[1])), dim=1)
         return bbox
 
-    def nms(self, bbox: torch.Tensor, score: torch.Tensor, offset: torch.Tensor) \
-            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def nms(self, bbox: torch.Tensor, score: torch.Tensor) -> torch.Tensor:  # checked
+        assert bbox.requires_grad
+        assert not score.requires_grad
+
         order = torch.topk(score[:, 1], min(score.size(0), self.n_pre_nms))[1]
         bbox = bbox[order]
-        score = score[order]
-        np_bbox = bbox.detach().numpy()
-        bbox_area = np.prod(np_bbox[:, 2:] - np_bbox[:, :2], axis=1)
-        selec = []
-        for i, b in enumerate(np_bbox):
-            tl = np.maximum(b[:2], np_bbox[selec, :2])
-            br = np.minimum(b[2:], np_bbox[selec, 2:])
-            cap = np.prod(br - tl, axis=1) * (tl < br).all(axis=1)
+        dt_bbox = bbox.detach()
 
-            iou = cap / (bbox_area[i] + bbox_area[selec] - cap)
+        area = (dt_bbox[:, 2:] - dt_bbox[:, :2]).prod(1)
+        selec = []
+        for i, b in enumerate(dt_bbox):
+            if not selec:
+                selec.append(i)
+            tl = torch.max(b[:2], dt_bbox[selec, :2])
+            br = torch.min(b[2:], dt_bbox[selec, 2:])
+
+            cap = torch.where((tl < br).all(1), (br - tl).prod(1), torch.zeros(1))
+
+            iou = cap / (area[i] + area[selec] - cap)  # squeezeは?
             if (iou < self.nms_thresh).all():
                 selec.append(i)
 
-        bbox = bbox[selec[:self.n_post_nms]]
-        score = score[selec[:self.n_post_nms]]
-        offset = offset[selec[:self.n_post_nms]]
-        return bbox, score, offset
+        if self.n_post_nms < len(selec):
+            selec = selec[:self.n_post_nms]
 
-    def enumerate_shifted_anchor(self, input_size, features_size) -> np.ndarray:
+        bbox = bbox[selec]
+        return bbox
+
+    def enumerate_shifted_anchor(self, input_size: Tuple[int, int], features_size: Tuple[int, int]) -> torch.Tensor:
         x_feat_stride = input_size[0] / features_size[0]
         y_feat_stride = input_size[0] / features_size[0]
-        shift_x, shift_y = np.meshgrid(np.arange((x_feat_stride-1)/2, input_size[0], x_feat_stride, dtype=np.float32),
-                                       np.arange((y_feat_stride-1)/2, input_size[1], y_feat_stride, dtype=np.float32))
+        shift_y, shift_x = torch.meshgrid(
+            (torch.arange(x_feat_stride / 2, input_size[0], x_feat_stride),
+             torch.arange(y_feat_stride / 2, input_size[1], y_feat_stride)))
 
-        shift = np.stack((shift_y.flatten(), shift_x.flatten(), shift_y.flatten(), shift_x.flatten()), axis=1)
-        anchor = (np.expand_dims(shift, 1) + np.expand_dims(self.anchor_base, 0)).reshape(-1, 4)
+        shift = torch.stack((shift_y.flatten(), shift_x.flatten(), shift_y.flatten(), shift_x.flatten()), dim=1)
+        anchor = (shift.unsqueeze(1) + self.anchor_base.unsqueeze(0)).view(-1, 4)
         return anchor
-
 
 
 def main():
@@ -440,7 +474,8 @@ def main():
             transforms.Resize(256),
             transforms.ToTensor())),
         bbox_transform=lambda x: x / 3,
-        mask_transform=lambda x: resize(x.transpose((1, 2, 0)), (256, 256), anti_aliasing=True).transpose((2, 0, 1)),
+        mask_transform=lambda x: resize(x.transpose((1, 2, 0)), (256, 256), anti_aliasing=True).
+            transpose((2, 0, 1)).astype(np.float32),
     )
 
     n = min(64*4, int(len(dataset) * 0.01))
