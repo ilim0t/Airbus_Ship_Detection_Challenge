@@ -16,7 +16,7 @@ from datetime import datetime
 from tensorboardX import SummaryWriter
 import itertools
 
-from dataset import SatelliteImages
+from dataset import SatelliteImages, MaskOnly
 from util import decode, show
 from repoter import Repoter
 
@@ -26,15 +26,17 @@ def train(model, device, train_loader, optimizer, reporter, step):
     model.train()
     data = data.to(device)
     optimizer.zero_grad()
-    loss, rpn_loc_loss, rpn_cls_loss, roi_loc_loss, roi_cls_loss, mask_loss, bbox, mask = model(data, bboxs, masks)
+    loss, rpn_loc_loss, rpn_cls_loss, roi_loc_loss, roi_cls_loss, mask_loss, bbox, mask, (gt_label, predict_cls) = model(data, bboxs, masks)
     loss.backward()
     optimizer.step()
 
     reporter.report({"train/loss": loss.item()})
     reporter.writer.add_scalar("train/loss", loss.item(), step)
-    reporter.writer.add_scalar("train/rpn_loc_loss", rpn_loc_loss.item(), step)
-    if rpn_cls_loss is not None:
-        reporter.writer.add_scalar("train/rpn_cls_loss", rpn_cls_loss.item(), step)
+    reporter.writer.add_scalar("train/rpn_cls_loss", rpn_cls_loss.item(), step)
+    reporter.writer.add_pr_curve("train/rpn_cls", gt_label[gt_label >= 0], F.softmax(predict_cls)[gt_label >= 0, 1], step)
+    # gt_label[gt_label >= 0].numpy(), F.softmax(predict_cls)[gt_label >= 0, 1].numpy()
+    if rpn_loc_loss is not None:
+        reporter.writer.add_scalar("train/rpn_loc_loss", rpn_loc_loss.item(), step)
         reporter.writer.add_scalar("train/roi_loc_loss", roi_loc_loss.item(), step)
         reporter.writer.add_scalar("train/roi_cls_loss", roi_cls_loss.item(), step)
         if bbox.numel():
@@ -113,6 +115,9 @@ class MaskRCNNTrain(nn.Module):
         neg_iou_thresh = 0.3
         pos_ratio = 0.5
 
+        # self._n = 0
+        self._n = 200
+
     def forward(self, x: torch.Tensor, gt_bboxes: Tuple[np.ndarray], gt_masks: Tuple[np.ndarray]):
         # (ymin, xmin, ymax, xmax)
         # (y, x, h, w)
@@ -135,30 +140,32 @@ class MaskRCNNTrain(nn.Module):
             gt_bbox = torch.from_numpy(gt_bbox) if gt_bbox is not None else None
             gt_mask = torch.from_numpy(gt_mask) if gt_mask is not None else None
 
+            self._n += 1
+
             roi = self.mask_rcnn.rpn(anchor, offset, score.detach(), x.shape[2:4])
-            if gt_bbox is not None:
+            if self._n > 200 and gt_bbox is not None:
                 # print("gt_bbox area: " + ",".join([str(num.numpy()) for num in (gt_bbox[:, 2] - gt_bbox[:, 0]) * (gt_bbox[:, 3] - gt_bbox[:, 1])]))
                 sampled_roi, sampled_loc, gt_roi_label, gt_roi_mask = self.proposal_target_creator(roi, gt_bbox, gt_mask, x.shape[2:])
                 head_cls_loc, head_score, mask = self.mask_rcnn.head(feature, sampled_roi.detach(), x.shape[2:])
             gt_loc_with_anchor, gt_rpn_label = self.anchor_target_creator(anchor, gt_bbox, x.shape[2:])
-            if gt_bbox is not None:
+            if self._n > 200 and gt_bbox is not None:
                 rpn_loc_loss = self.loc_loss(offset, gt_loc_with_anchor, gt_rpn_label)
             rpn_cls_loss = F.cross_entropy(score, gt_rpn_label, ignore_index=-1)
-            if gt_bbox is not None:
+            if self._n > 200 and gt_bbox is not None:
                 roi_loc_loss = self.loc_loss(head_cls_loc[np.arange(len(head_cls_loc)), gt_roi_label],
                                              sampled_loc, gt_roi_label)  # inf
                 roi_cls_loss = F.cross_entropy(head_score, gt_roi_label, ignore_index=-1)
                 mask_loss = F.cross_entropy(mask, gt_roi_mask) if torch.max(gt_roi_mask) == 1 else torch.zeros(1)
 
-            if gt_bbox is not None:
+            if self._n > 200 and gt_bbox is not None:
                 loss = rpn_loc_loss + rpn_cls_loss + roi_loc_loss + roi_cls_loss + mask_loss
                 argmax = torch.argmax(head_score, 1)
                 return loss, rpn_loc_loss, rpn_cls_loss, roi_loc_loss, roi_cls_loss, mask_loss,\
-                       head_cls_loc[argmax == 1, 1, :], mask[argmax == 1]
+                       head_cls_loc[argmax == 1, 1, :], mask[argmax == 1], (gt_rpn_label, score)
                        # head_cls_loc[argmax == 1, 1, :], mask[argmax == 1]
             else:
                 loss = rpn_cls_loss
-                return loss, rpn_cls_loss, None, None, None, None, None, None
+                return loss, None, rpn_cls_loss, None, None, None, None, None, (gt_rpn_label, score)
 
     def calc_iou(self, bbox: torch.Tensor, gt_bbox: torch.Tensor) -> torch.Tensor:
         assert not bbox.requires_grad
@@ -178,8 +185,8 @@ class MaskRCNNTrain(nn.Module):
         assert not bbox.requires_grad
         assert not gt_bbox.requires_grad
 
-        height = bbox[:, 2] - bbox[:, 0]  # bbox = []
-        width = bbox[:, 3] - bbox[:, 1]
+        height = torch.clamp(bbox[:, 2] - bbox[:, 0], min=1e-2)  # bbox = []
+        width = torch.clamp(bbox[:, 3] - bbox[:, 1], min=1e-2)
 
         dy = (gt_bbox[:, 2] + gt_bbox[:, 0] - bbox[:, 2] - bbox[:, 0]) / 2 / height
         dx = (gt_bbox[:, 3] + gt_bbox[:, 2] - bbox[:, 3] - bbox[:, 2]) / 2 / width
@@ -508,7 +515,7 @@ def main():
     kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
 
     from skimage.transform import resize
-    dataset = SatelliteImages(
+    dataset = MaskOnly(
         transform=transforms.Compose((
             transforms.Resize(256),
             transforms.ToTensor())),
@@ -543,9 +550,9 @@ def main():
 
             with reporter.scope(epoch_idx - 1, step):
                 train(model, device, train_iter, optimizer, reporter, step)
-                if step % args.eval_interval == 0:
-                    # return
-                    eval(model, device, eval_loader, reporter, step)
+                # if step % args.eval_interval == 0:
+                #     return
+                #     eval(model, device, eval_loader, reporter, step)
         torch.save(model.state_dict(), "snapshot")
 
 

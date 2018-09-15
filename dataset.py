@@ -87,6 +87,12 @@ class SatelliteImages(Dataset):
         return len(self.data)
 
 
+class MaskOnly(SatelliteImages):
+    def __init__(self, *args, **kwargs):
+        super(MaskOnly, self).__init__(*args, **kwargs)
+        self.data = tuple(filter(lambda x: x[1] != (), self.data))
+
+
 if __name__ == "__main__":
     dataset = SatelliteImages(".")
     img = dataset[0]
