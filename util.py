@@ -38,7 +38,8 @@ def encode(img: np.ndarray) -> str:
 
 def decode(data: Tuple[Tuple[int]], size: Tuple[int, int]=(768, 768)) -> Tuple[np.ndarray]:
     if len(data) == 0:
-        return np.full((1, 4), -1), np.full((1, *size), -1)
+        # return np.full((1, 4), -1, dtype=np.float32), np.full((1, *size), -1, dtype=np.float32)
+        return None, None
     # if isinstance(data, str):
     #     data = [int(i) for i in data.split()]
     result = []

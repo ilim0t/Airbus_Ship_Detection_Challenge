@@ -72,10 +72,10 @@ class SatelliteImages(Dataset):
         if self.transform is not None:
             img = self.transform(img)
 
-        if self.train and self.bbox_transform is not None:
+        if self.train and bbox is not None and self.bbox_transform is not None:
             bbox = self.bbox_transform(bbox)
 
-        if self.train and self.mask_transform is not None:
+        if self.train and bbox is not None and self.mask_transform is not None:
             mask = self.mask_transform(mask)
 
         if self.train:

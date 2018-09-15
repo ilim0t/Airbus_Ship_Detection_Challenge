@@ -5,51 +5,78 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import transforms, models
 from torch.utils.data import DataLoader, random_split
+from torchvision import utils
 
 import argparse
 import json
 import numpy as np
 from typing import Tuple
+import os
+from datetime import datetime
+from tensorboardX import SummaryWriter
+import itertools
 
 from dataset import SatelliteImages
 from util import decode, show
+from repoter import Repoter
 
 
-def train(args, model, device, train_loader, optimizer, epoch):
+def train(model, device, train_loader, optimizer, reporter, step):
+    data, bboxs, masks = next(train_loader)
     model.train()
-    for batch_idx, (data, bbox, mask) in enumerate(train_loader):  # data, (bboxs, masks)
-        data = data.to(device)
-        optimizer.zero_grad()
-        loss = model(data, bbox, mask)
-        loss.backward()
-        optimizer.step()
-        if batch_idx % args.log_interval == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(train_loader.dataset),
-                100. * batch_idx / len(train_loader), loss.item()))
+    data = data.to(device)
+    optimizer.zero_grad()
+    loss, rpn_loc_loss, rpn_cls_loss, roi_loc_loss, roi_cls_loss, mask_loss, bbox, mask = model(data, bboxs, masks)
+    loss.backward()
+    optimizer.step()
+
+    reporter.report({"train/loss": loss.item()})
+    reporter.writer.add_scalar("train/loss", loss.item(), step)
+    reporter.writer.add_scalar("train/rpn_loc_loss", rpn_loc_loss.item(), step)
+    if rpn_cls_loss is not None:
+        reporter.writer.add_scalar("train/rpn_cls_loss", rpn_cls_loss.item(), step)
+        reporter.writer.add_scalar("train/roi_loc_loss", roi_loc_loss.item(), step)
+        reporter.writer.add_scalar("train/roi_cls_loss", roi_cls_loss.item(), step)
+        if bbox.numel():
+            bbox[:, 0] = torch.clamp(bbox[:, 0], 0, data.size(2))
+            bbox[:, 1] = torch.clamp(bbox[:, 1], 0, data.size(3))
+            bbox[:, 2] = torch.clamp(bbox[:, 2], 0, data.size(2))
+            bbox[:, 3] = torch.clamp(bbox[:, 3], 0, data.size(3))
+            reporter.writer.add_scalar("train/mask_loss", mask_loss.item(), step)
+            reporter.writer.add_image_with_boxes('train/bbox', data[0], torch.cat((torch.zeros(bbox.size(0), 1), bbox), dim=1), step)
+        else:
+            ...
+    # reporter.writer.add_histogram("intermediate.W", model.mask_rcnn.intermediate.weight, step)
+    if bboxs[0] is not None:
+        reporter.writer.add_image_with_boxes('train/gt_bbox', data[0], torch.cat((torch.zeros(bboxs[0].shape[0], 1), torch.from_numpy(bboxs[0])), dim=1), step)
 
 
-def test(args, model, device, eval_dataset):
+def eval(model, device, eval_loader, reporter, step):
     model.eval()
-    test_loss = 0
-    correct = 0
+    eval_loss = 0
+    accuracy = []
+    # cum_output = []
     with torch.no_grad():
-        for data, target in eval_dataset:
+        for data, target in eval_loader:
             data, target = data.to(device), target.to(device)
             output = model(data)
-            test_loss += F.nll_loss(output, target, reduction='sum').item() # sum up batch loss
-            pred = output.max(1, keepdim=True)[1] # get the index of the max log-probability
-            correct += pred.eq(target.view_as(pred)).sum().item()
+            eval_loss += F.binary_cross_entropy(output, target)
 
-    test_loss /= len(eval_dataset.dataset)
-    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        test_loss, correct, len(eval_dataset.dataset),
-        100. * correct / len(eval_dataset.dataset)))
+            predict = output > 0.5
+            target = target > 0.5
 
+            accuracy.append((predict == target).float())
 
-import collections
-import re
-from torch._six import string_classes, int_classes
+    eval_loss /= len(eval_loader)
+    accuracy = torch.cat(accuracy).mean()
+
+    # cum_output = torch.cat(cum_output).view(-1)
+
+    reporter.report({"eval/loss": eval_loss.item(),
+                     "eval/accuracy": accuracy.item()})
+    reporter.writer.add_scalar("eval/loss", eval_loss.item(), step)
+    reporter.writer.add_scalar("eval/accuracy", accuracy.item(), step)
+    # reporter.writer.add_pr_curve("eval", ground_true, cum_output, step)
 
 
 def collate(batch):
@@ -91,12 +118,13 @@ class MaskRCNNTrain(nn.Module):
         # (y, x, h, w)
         # の順
         # [bg, fg]
+        assert x.size(0) == 1, "現在 minibatch == 1 のみ対応しています"
 
         # Backbone, Extractor
         features = self.mask_rcnn.extractor(x)
         features.requires_grad = True
-
         assert x.size(2) % features.size(2) == x.size(3) % features.size(3) == 0
+
         # RPN
         anchor = self.mask_rcnn.enumerate_shifted_anchor(x.shape[2:], features.shape[2:])
         h = F.relu(self.mask_rcnn.intermediate(features))
@@ -104,28 +132,39 @@ class MaskRCNNTrain(nn.Module):
         offsets = self.mask_rcnn.region(h).permute((0, 2, 3, 1)).contiguous().view((x.size(0), -1, 4))
 
         for i, (feature, score, offset, gt_bbox, gt_mask) in enumerate(zip(features, scores, offsets, gt_bboxes, gt_masks)):
-            gt_bbox = torch.from_numpy(gt_bbox)
-            gt_mask = torch.from_numpy(gt_mask)
+            gt_bbox = torch.from_numpy(gt_bbox) if gt_bbox is not None else None
+            gt_mask = torch.from_numpy(gt_mask) if gt_mask is not None else None
 
             roi = self.mask_rcnn.rpn(anchor, offset, score.detach(), x.shape[2:4])
-            sampled_roi, sampled_loc, gt_roi_label, gt_roi_mask = self.proposal_target_creator(roi, gt_bbox, gt_mask, x.shape[2:])
-            head_cls_loc, head_score, mask = self.mask_rcnn.head(feature, sampled_roi.detach(), x.shape[2:])
+            if gt_bbox is not None:
+                # print("gt_bbox area: " + ",".join([str(num.numpy()) for num in (gt_bbox[:, 2] - gt_bbox[:, 0]) * (gt_bbox[:, 3] - gt_bbox[:, 1])]))
+                sampled_roi, sampled_loc, gt_roi_label, gt_roi_mask = self.proposal_target_creator(roi, gt_bbox, gt_mask, x.shape[2:])
+                head_cls_loc, head_score, mask = self.mask_rcnn.head(feature, sampled_roi.detach(), x.shape[2:])
             gt_loc_with_anchor, gt_rpn_label = self.anchor_target_creator(anchor, gt_bbox, x.shape[2:])
-
-            rpn_loc_loss = self.loc_loss(offset, gt_loc_with_anchor, gt_rpn_label)
+            if gt_bbox is not None:
+                rpn_loc_loss = self.loc_loss(offset, gt_loc_with_anchor, gt_rpn_label)
             rpn_cls_loss = F.cross_entropy(score, gt_rpn_label, ignore_index=-1)
-            roi_loc_loss = self.loc_loss(head_cls_loc[np.arange(len(head_cls_loc)), gt_roi_label],
-                                         sampled_loc, gt_roi_label)
-            roi_cls_loss = F.cross_entropy(head_score, gt_roi_label, ignore_index=-1)
-            mask_loss = F.cross_entropy(mask, gt_roi_mask)
+            if gt_bbox is not None:
+                roi_loc_loss = self.loc_loss(head_cls_loc[np.arange(len(head_cls_loc)), gt_roi_label],
+                                             sampled_loc, gt_roi_label)  # inf
+                roi_cls_loss = F.cross_entropy(head_score, gt_roi_label, ignore_index=-1)
+                mask_loss = F.cross_entropy(mask, gt_roi_mask) if torch.max(gt_roi_mask) == 1 else torch.zeros(1)
 
-            loss = rpn_loc_loss + rpn_cls_loss + roi_loc_loss + roi_cls_loss + mask_loss
-        return loss
+            if gt_bbox is not None:
+                loss = rpn_loc_loss + rpn_cls_loss + roi_loc_loss + roi_cls_loss + mask_loss
+                argmax = torch.argmax(head_score, 1)
+                return loss, rpn_loc_loss, rpn_cls_loss, roi_loc_loss, roi_cls_loss, mask_loss,\
+                       head_cls_loc[argmax == 1, 1, :], mask[argmax == 1]
+                       # head_cls_loc[argmax == 1, 1, :], mask[argmax == 1]
+            else:
+                loss = rpn_cls_loss
+                return loss, rpn_cls_loss, None, None, None, None, None, None
 
     def calc_iou(self, bbox: torch.Tensor, gt_bbox: torch.Tensor) -> torch.Tensor:
         assert not bbox.requires_grad
-        assert not bbox.requires_grad
-
+        assert gt_bbox is None or not gt_bbox.requires_grad
+        if gt_bbox is None:
+            return torch.zeros(bbox.size(0), 1)
         tl = torch.max(bbox[:, None, :2], gt_bbox[:, :2])  # [..., None, ...] は np.expand_dim(input, n) と等価
         br = torch.min(bbox[:, None, 2:], gt_bbox[:, 2:])
 
@@ -139,7 +178,7 @@ class MaskRCNNTrain(nn.Module):
         assert not bbox.requires_grad
         assert not gt_bbox.requires_grad
 
-        height = bbox[:, 2] - bbox[:, 0]
+        height = bbox[:, 2] - bbox[:, 0]  # bbox = []
         width = bbox[:, 3] - bbox[:, 1]
 
         dy = (gt_bbox[:, 2] + gt_bbox[:, 0] - bbox[:, 2] - bbox[:, 0]) / 2 / height
@@ -167,13 +206,17 @@ class MaskRCNNTrain(nn.Module):
     def proposal_target_creator(self, bbox: torch.Tensor, gt_bbox: torch.Tensor, gt_mask: torch.Tensor, size: Tuple[int, int]) \
             -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         assert bbox.requires_grad
-        assert not gt_bbox.requires_grad
+        assert gt_bbox is None or not gt_bbox.requires_grad
+        assert gt_mask is None or not gt_mask.requires_grad
         # bbox = torch.cat((bbox, gt_bbox))
 
         iou = self.calc_iou(bbox.detach(), gt_bbox)
         max_iou, gt_assignment = iou.max(dim=1)
+        # gt_max_ious, gt_argmax_ious = iou.max(0)
+        # gt_argmax_ious = np.where(iou == gt_max_ious)[0]
 
         pos_index = np.where(max_iou >= self.pos_iou_thresh)[0]
+        # pos_index = np.where((max_iou >= self.pos_iou_thresh).numpy() | np.any((iou == gt_max_ious).numpy(), 1))[0]
         pos_roi_per_this_image = int(min(np.round(self.n_sample * self.pos_ratio), pos_index.size))
         if pos_index.size > 0:
             pos_index = np.random.choice(
@@ -209,7 +252,7 @@ class MaskRCNNTrain(nn.Module):
     def anchor_target_creator(self, anchor: torch.Tensor, bbox: torch.Tensor, size: Tuple[int, int]) \
             -> Tuple[torch.Tensor, torch.Tensor]:
         assert not anchor.requires_grad
-        assert not bbox.requires_grad
+        # assert not bbox.requires_grad
         # anchor = torch.cat((anchor, bbox))
 
         n_sample = 256
@@ -232,7 +275,8 @@ class MaskRCNNTrain(nn.Module):
         gt_argmax_ious = np.where(ious == gt_max_ious)[0]
 
         label[max_ious < neg_iou_thresh] = 0
-        label[gt_argmax_ious] = 1
+        if gt_max_ious.max().item() != 0:
+            label[gt_argmax_ious] = 1
         label[max_ious >= pos_iou_thresh] = 1
 
         n_pos = int(pos_ratio * n_sample)
@@ -249,10 +293,10 @@ class MaskRCNNTrain(nn.Module):
                 neg_index, size=(len(neg_index) - n_neg), replace=False)
             label[disable_index] = -1
 
-        loc = self.bbox2loc(anchor, bbox[argmax_ious])
+        loc = self.bbox2loc(anchor, bbox[argmax_ious]) if bbox is not None else None
 
         label = self._unmap(label, n_anchor, keep, fill=-1)
-        loc = self._unmap(loc, n_anchor, keep, fill=0)
+        loc = self._unmap(loc, n_anchor, keep, fill=0) if bbox is not None else None
         return loc, label
 
     def _unmap(self, data: torch.Tensor, count: int, index: np.ndarray, fill: float=0):
@@ -275,9 +319,7 @@ class MaskRCNN(nn.Module):
         self.nms_thresh = 0.7
         self.n_post_nms = 2000
         anchor_base = np.array([(np.sqrt(area / ratio) / 2, np.sqrt(area * ratio) / 2)
-                                # for ratio in (0.5, 1, 2) for area in (18000, 9000, 2000)], dtype=np.float32)
-                                # for ratio in (0.5, 1, 2) for area in (18000/9, 9000/9, 2000/9, 30)], dtype=np.float32)
-                                for ratio in (1,) for area in (200, 4000, 10000)], dtype=np.float32)
+                                for ratio in (0.5, 1, 2) for area in (80, 400, 1000)], dtype=np.float32)
 
         self.n_anchor = len(anchor_base)
         self.anchor_base = torch.from_numpy(np.concatenate((-anchor_base, anchor_base), axis=1))
@@ -306,23 +348,20 @@ class MaskRCNN(nn.Module):
         # [bg, fg]
 
         # Backbone, Extractor
-        features = self.extractor(x)
-
+        features = self.mask_rcnn.extractor(x)
         assert x.size(2) % features.size(2) == x.size(3) % features.size(3) == 0
+
         # RPN
-        anchor = self.enumerate_shifted_anchor(x.shape[2:], features.shape[2:])
+        anchor = self.mask_rcnn.enumerate_shifted_anchor(x.shape[2:], features.shape[2:])
+        h = F.relu(self.mask_rcnn.intermediate(features))
+        scores = self.mask_rcnn.cls(h).permute((0, 2, 3, 1)).contiguous().view((x.size(0), -1, 2))
+        offsets = self.mask_rcnn.region(h).permute((0, 2, 3, 1)).contiguous().view((x.size(0), -1, 4))
 
-        h = F.relu(self.intermediate(features))
-
-        # -1 -> features.size(2) * features.size(3) * self.n_anchor
-        score = self.cls(h).permute((0, 2, 3, 1)).contiguous().view((x.size(0), -1, 2))
-        offset = self.region(h).permute((0, 2, 3, 1)).contiguous().view((x.size(0), -1, 4))
-
-        for i, (s, o) in enumerate(zip(score, offset)):
-            bbox, score_ = self.rpn(anchor, o, s, x.size(2), x.size(3))
-
-        # Head
-        return x
+        for i, (feature, score, offset) in enumerate(zip(features, scores, offsets)):
+            roi = self.mask_rcnn.rpn(anchor, offset, score.detach(), x.shape[2:4])
+            head_cls_loc, head_score, mask = self.mask_rcnn.head(feature, roi, x.shape[2:])
+            raise SystemExit
+        # return mask
 
     def rpn(self, anchor: torch.Tensor, offset: torch.Tensor, score: torch.Tensor, size: Tuple[int, int]) \
             -> torch.Tensor:
@@ -447,7 +486,7 @@ class MaskRCNN(nn.Module):
 
 def main():
     parser = argparse.ArgumentParser(description='Airbus Ship Detection Challenge')
-    parser.add_argument('--batch_size', '-b', type=int, default=2,
+    parser.add_argument('--batch_size', '-b', type=int, default=1,
                         help='1バッチあたり何枚か')
     parser.add_argument('--epochs', '-e', type=int, default=5,
                         help='何epochやるか')
@@ -464,7 +503,7 @@ def main():
 
     use_cuda = not args.no_cuda and torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
-    torch.manual_seed(2)
+    torch.manual_seed(0)
 
     kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
 
@@ -474,7 +513,7 @@ def main():
             transforms.Resize(256),
             transforms.ToTensor())),
         bbox_transform=lambda x: x / 3,
-        mask_transform=lambda x: resize(x.transpose((1, 2, 0)), (256, 256), anti_aliasing=True).
+        mask_transform=lambda x: resize(x.transpose((1, 2, 0)), (256, 256), mode='reflect', anti_aliasing=True).
             transpose((2, 0, 1)).astype(np.float32),
     )
 
@@ -487,9 +526,27 @@ def main():
     model = MaskRCNNTrain(MaskRCNN()).to(device)
     optimizer = optim.Adam(model.parameters())
 
-    for epoch in range(1, args.epochs + 1):
-        train(args, model, device, train_loader, optimizer, epoch)
-        test(args, model, device, eval_loader)
+    writer = SummaryWriter(
+        os.path.join(args.out, datetime.now().strftime('%m-%d_%H:%M:%S_bs-{}'.format(args.batch_size))))
+
+    reporter = Repoter(
+        ['epoch', 'iteration', 'train/loss', 'train/accuracy', 'eval/loss', 'eval/accuracy', 'elapsed_time'],
+        writer, trigger=(args.log_interval, 'iteration'), all_epoch=args.epochs, iter_per_epoch=len(train_loader))
+
+    # torch.backends.cudnn.benchmark = True
+    # torch.set_num_threads(int)
+
+    for epoch_idx in range(1, args.epochs + 1) if args.epochs > 0 else itertools.count(1):
+        train_iter = iter(train_loader)
+        for iteration_idx in range(1, len(train_loader) + 1):
+            step = iteration_idx + (epoch_idx - 1) * len(train_loader)
+
+            with reporter.scope(epoch_idx - 1, step):
+                train(model, device, train_iter, optimizer, reporter, step)
+                if step % args.eval_interval == 0:
+                    # return
+                    eval(model, device, eval_loader, reporter, step)
+        torch.save(model.state_dict(), "snapshot")
 
 
 if __name__ == '__main__':

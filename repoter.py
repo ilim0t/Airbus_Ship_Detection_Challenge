@@ -10,7 +10,6 @@ import time
 from tensorboardX import SummaryWriter
 
 
-
 # class Repoter(SummaryWriter, LogReport):
 class Repoter(object):
     _out = sys.stdout
